@@ -18,3 +18,15 @@ export const AlertAPI = {
   list: () => api.get('/alerts'),
   acknowledge: (id) => api.post(`/alerts/${id}/acknowledge`),
 };
+
+
+export const TripAPI = {
+  list: (params = {}) => api.get('/trips', { params }),
+  get: (id) => api.get(`/trips/${id}`),
+  update: (id, payload) => api.put(`/trips/${id}`, payload),
+  complete: (id, payload = {}) => api.post(`/trips/${id}/complete`, payload),
+  addExpense: (id, payload) => api.post(`/trips/${id}/expenses`, payload),
+  updateExpense: (id, expenseId, payload) => api.put(`/trips/${id}/expenses/${expenseId}`, payload),
+  deleteExpense: (id, expenseId) => api.delete(`/trips/${id}/expenses/${expenseId}`),
+  report: (id) => api.get(`/trips/${id}/report`),
+};

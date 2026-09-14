@@ -1,20 +1,23 @@
 import { io } from 'socket.io-client';
 import { API_BASE_URL } from '../api/axios.js';
 
+const SOCKET_URL = String(import.meta.env.VITE_SOCKET_URL || API_BASE_URL).trim().replace(/\/+$/, '');
+
 let socket = null;
-const listeners = new Map(); // event -> Set(handler)
+const listeners = new Map();
 
 function ensureSocket(token) {
   if (socket) return socket;
 
-  socket = io(API_BASE_URL, {
+  socket = io(SOCKET_URL, {
     auth: { token },
     autoConnect: true,
     reconnection: true,
+    reconnectionAttempts: Infinity,
     reconnectionDelay: 1000,
+    transports: ['websocket', 'polling'],
   });
 
-  // Re-attach any handlers registered before connection existed
   listeners.forEach((handlers, event) => {
     handlers.forEach((handler) => socket.on(event, handler));
   });

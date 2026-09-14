@@ -47,6 +47,13 @@ function registerDeviceSocket(io) {
           io.to(`user_${vehicle.user_id}`).emit('alert:new', alert);
         });
 
+        if (result.tripCreated && result.trip) {
+          io.to(`user_${vehicle.user_id}`).emit('trip:created', result.trip);
+        }
+        if (result.tripCompleted) {
+          io.to(`user_${vehicle.user_id}`).emit('trip:completed', result.tripCompleted);
+        }
+
         if (typeof ack === 'function') {
           ack({ success: true, alert: alerts.length > 0, alerts });
         }

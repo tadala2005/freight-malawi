@@ -11,7 +11,8 @@ router.post('/device', asyncHandler(async (req, res) => {
   const io = req.app.get('io');
 
   try {
-    const { vehicle, alerts } = await processTelemetry(req.body);
+    const result = await processTelemetry(req.body);
+    const { vehicle, alerts } = result;
 
     if (io) {
       io.to(`user_${vehicle.user_id}`).emit('vehicle:update', {
@@ -22,6 +23,12 @@ router.post('/device', asyncHandler(async (req, res) => {
       alerts.forEach((alert) => {
         io.to(`user_${vehicle.user_id}`).emit('alert:new', alert);
       });
+      if (result.tripCreated && result.trip) {
+        io.to(`user_${vehicle.user_id}`).emit('trip:created', result.trip);
+      }
+      if (result.tripCompleted) {
+        io.to(`user_${vehicle.user_id}`).emit('trip:completed', result.tripCompleted);
+      }
     }
 
     const primaryAlert = alerts[0];

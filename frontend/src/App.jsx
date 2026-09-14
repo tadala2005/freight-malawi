@@ -8,6 +8,8 @@ import Vehicles from './pages/Vehicles.jsx';
 import History from './pages/History.jsx';
 import Reports from './pages/Reports.jsx';
 import Alerts from './pages/Alerts.jsx';
+import Logbook from './pages/Logbook.jsx';
+import TripReport from './pages/TripReport.jsx';
 
 function RequireAuth({ children }) {
   const { user, loading } = useAuth();
@@ -34,6 +36,8 @@ export default function App() {
       <Route path="/history" element={<RequireAuth><History /></RequireAuth>} />
       <Route path="/reports" element={<RequireAuth><Reports /></RequireAuth>} />
       <Route path="/alerts" element={<RequireAuth><Alerts /></RequireAuth>} />
+      <Route path="/logbook" element={<RequireAuth><Logbook /></RequireAuth>} />
+      <Route path="/trip-reports/:id" element={<RequireAuth><TripReport /></RequireAuth>} />
 
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

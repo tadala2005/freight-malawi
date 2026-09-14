@@ -331,3 +331,25 @@ a { color: var(--fm-teal); }
     grid-template-columns: 1fr !important;
   }
 }
+
+.trip-status { display: inline-flex; padding: 3px 8px; border-radius: 999px; font-size: var(--fm-text-xs); font-weight: 700; text-transform: uppercase; }
+.trip-status.pending { background: var(--fm-warning-tint); color: var(--fm-warning); }
+.trip-status.active { background: var(--fm-teal-tint); color: var(--fm-teal); }
+.trip-status.completed { background: var(--fm-navy-tint); color: var(--fm-navy); }
+.trip-status.cancelled { background: var(--fm-red-tint); color: var(--fm-red); }
+.financial-profit { color: var(--fm-teal); font-weight: 700; }
+.financial-loss { color: var(--fm-red); font-weight: 700; }
+.trip-detail-grid, .report-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.trip-detail-grid > div { display: flex; flex-direction: column; gap: 5px; }
+.trip-detail-grid span, .profit-banner span { color: var(--fm-muted); font-size: var(--fm-text-xs); text-transform: uppercase; letter-spacing: .03em; }
+.trip-detail-section { margin-top: 18px; }
+.trip-detail-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
+.expense-form { display: grid; grid-template-columns: 1fr 1.4fr 1fr auto; gap: 8px; margin-top: 12px; align-items: end; }
+.profit-banner { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 12px; border: 1px solid var(--fm-border); border-radius: var(--fm-radius-control); padding: 14px; background: var(--fm-bg); }
+.profit-banner > div { display: flex; flex-direction: column; gap: 4px; }
+.profit-banner.profit { border-color: var(--fm-teal); background: var(--fm-teal-tint); }
+.profit-banner.loss { border-color: var(--fm-red); background: var(--fm-red-tint); }
+.profit-banner.break-even { border-color: var(--fm-border); background: var(--fm-bg); }
+@media (max-width: 767px) {
+  .trip-detail-grid, .report-detail-grid, .profit-banner, .expense-form { grid-template-columns: 1fr; }
+}

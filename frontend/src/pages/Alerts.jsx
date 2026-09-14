@@ -26,8 +26,11 @@ export default function Alerts() {
     const off = subscribe('alert:new', (alert) => {
       setAlerts((prev) => [{ ...alert, created_at: alert.createdAt || new Date().toISOString() }, ...prev]);
     });
-    return off;
-  }, []);
+    const offCompleted = subscribe('trip:completed', () => {
+      loadAlerts().catch(() => {});
+    });
+    return () => { off(); offCompleted(); };
+  }, [loadAlerts]);
 
   async function handleAcknowledge(alertId) {
     setAcknowledgingId(alertId);

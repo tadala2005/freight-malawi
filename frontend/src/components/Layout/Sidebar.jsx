@@ -1,6 +1,6 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { Gauge, Truck, Route, FileBarChart, Bell, LogOut, User } from 'lucide-react';
+import { Gauge, Truck, Route, FileBarChart, Bell, BookOpen, LogOut, User } from 'lucide-react';
 import LogoReversed from '../Brand/LogoReversed.jsx';
 import LogoIcon from '../Brand/LogoIcon.jsx';
 import { useAuth } from '../../context/AuthContext.jsx';
@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { to: '/history', label: 'History', icon: Route },
   { to: '/reports', label: 'Reports', icon: FileBarChart },
   { to: '/alerts', label: 'Alerts', icon: Bell },
+  { to: '/logbook', label: 'Logbook', icon: BookOpen },
 ];
 
 export default function Sidebar({ collapsed }) {

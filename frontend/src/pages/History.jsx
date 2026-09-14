@@ -756,6 +756,7 @@ export default function History() {
                   : 'Load a route to display it'
               }
               className="map-card"
+              bodyClassName="map-card-body"
             >
               {loadingHistory ? (
                 <Skeleton height={420} />

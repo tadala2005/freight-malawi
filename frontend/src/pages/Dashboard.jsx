@@ -2,7 +2,6 @@ import React, {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from 'react';
 
@@ -26,28 +25,10 @@ import VehicleList from '../components/Dashboard/VehicleList.jsx';
 import FuelGauge from '../components/Dashboard/FuelGauge.jsx';
 import AlertPanel from '../components/Dashboard/AlertPanel.jsx';
 
-import {
-  VehicleAPI,
-  AlertAPI,
-} from '../api/endpoints.js';
+import { VehicleAPI, AlertAPI, TripAPI } from '../api/endpoints.js';
 
 import { subscribe } from '../socket/socket.js';
 import { useToast } from '../context/ToastContext.jsx';
-
-const TRIP_LOG_KEY =
-  'freight_malawi_trip_logs';
-
-function loadTripLogs() {
-  try {
-    return JSON.parse(
-      localStorage.getItem(
-        TRIP_LOG_KEY
-      ) || '[]'
-    );
-  } catch {
-    return [];
-  }
-}
 
 export default function Dashboard() {
   const { showToast } =
@@ -78,23 +59,22 @@ export default function Dashboard() {
   const [tripPrompt, setTripPrompt] =
     useState(null);
 
-  const [tripForm, setTripForm] =
-    useState({
-      origin: 'Lilongwe',
-      destination: 'Blantyre',
-      purpose: 'Freight delivery',
-      cargoDescription: '',
-      cargoWeightKg: '',
-      notes: '',
-    });
+  const [tripForm, setTripForm] = useState({
+    origin: '',
+    destination: '',
+    cargoType: 'General Freight',
+    cargoDescription: '',
+    cargoWeightKg: '',
+    plannedDistanceKm: '',
+    agreedPayment: '',
+    fuelPricePerLitre: '',
+    notes: '',
+  });
 
   const [
     tripSaving,
     setTripSaving,
   ] = useState(false);
-
-  const engineStateRef =
-    useRef(new Map());
 
   const loadData =
     useCallback(async () => {
@@ -142,23 +122,6 @@ export default function Dashboard() {
       subscribe(
         'vehicle:update',
         (payload) => {
-          const previousEngineState =
-            engineStateRef.current.get(
-              payload.vehicleId
-            );
-
-          const engineStarted =
-            payload.engineOn === true &&
-            previousEngineState !== true;
-
-          engineStateRef.current.set(
-            payload.vehicleId,
-            payload.engineOn === true
-          );
-
-          let currentVehicle =
-            null;
-
           setVehicles(
             (previous) =>
               previous.map(
@@ -169,9 +132,6 @@ export default function Dashboard() {
                   ) {
                     return vehicle;
                   }
-
-                  currentVehicle =
-                    vehicle;
 
                   return {
                     ...vehicle,
@@ -208,49 +168,32 @@ export default function Dashboard() {
               )
           );
 
-          if (
-            engineStarted &&
-            currentVehicle
-          ) {
-            setTripPrompt({
-              vehicle: {
-                ...currentVehicle,
-                latest_load_weight_kg:
-                  payload.loadWeightKg,
-              },
-
-              startedAt:
-                payload.timestamp ||
-                new Date().toISOString(),
-            });
-
-            setTripForm({
-              origin: 'Lilongwe',
-              destination: 'Blantyre',
-              purpose:
-                'Freight delivery',
-              cargoDescription: '',
-              cargoWeightKg:
-                payload.loadWeightKg
-                  ? String(
-                      payload.loadWeightKg
-                    )
-                  : '',
-              notes: '',
-            });
-
-            showToast(
-              `${currentVehicle.name} engine started — trip log required`,
-              'warning'
-            );
-          }
         }
       );
 
-    const offAlert =
-      subscribe(
-        'alert:new',
-        (alert) => {
+    const offTripCreated = subscribe('trip:created', (trip) => {
+      const vehicle = vehicles.find((item) => item.id === trip.vehicle_id);
+      setTripPrompt({ vehicle: vehicle || { id: trip.vehicle_id, name: trip.vehicle_name, license_plate: trip.license_plate, driver_name: trip.driver_name || trip.vehicle_driver_name }, trip });
+      setTripForm({
+        origin: '',
+        destination: '',
+        cargoType: 'General Freight',
+        cargoDescription: '',
+        cargoWeightKg: trip.cargo_weight_kg ? String(trip.cargo_weight_kg) : '',
+        plannedDistanceKm: '',
+        agreedPayment: '',
+        fuelPricePerLitre: '',
+        notes: '',
+      });
+      showToast(`${trip.vehicle_name || 'Vehicle'} engine started — trip log required`, 'warning');
+    });
+
+    const offTripCompleted = subscribe('trip:completed', () => {
+      showToast('Trip completed and report updated', 'success');
+      loadData().catch(() => {});
+    });
+
+    const offAlert = subscribe('alert:new', (alert) => {
           setAlerts(
             (previous) => [
               {
@@ -268,6 +211,8 @@ export default function Dashboard() {
 
     return () => {
       offUpdate();
+      offTripCreated();
+      offTripCompleted();
       offAlert();
     };
   }, [showToast]);
@@ -326,71 +271,34 @@ export default function Dashboard() {
     );
   }
 
-  function saveTripLog() {
-    if (!tripPrompt) {
-      return;
-    }
+  async function saveTripLog() {
+    if (!tripPrompt?.trip?.id) return;
 
-    if (
-      !tripForm.origin.trim() ||
-      !tripForm.destination.trim()
-    ) {
-      showToast(
-        'Origin and destination are required',
-        'error'
-      );
-
+    if (!tripForm.origin.trim() || !tripForm.destination.trim()) {
+      showToast('Origin and destination are required', 'error');
       return;
     }
 
     setTripSaving(true);
-
-    const logs =
-      loadTripLogs();
-
-    logs.unshift({
-      id: `${Date.now()}-${tripPrompt.vehicle.id}`,
-
-      vehicleId:
-        tripPrompt.vehicle.id,
-
-      vehicleName:
-        tripPrompt.vehicle.name,
-
-      plate:
-        tripPrompt.vehicle.license_plate,
-
-      driver:
-        tripPrompt.vehicle.driver_name,
-
-      startedAt:
-        tripPrompt.startedAt,
-
-      ...tripForm,
-
-      cargoWeightKg:
-        tripForm.cargoWeightKg
-          ? Number(
-              tripForm.cargoWeightKg
-            )
-          : null,
-
-      createdAt:
-        new Date().toISOString(),
-    });
-
-    localStorage.setItem(
-      TRIP_LOG_KEY,
-      JSON.stringify(logs)
-    );
-
-    setTripSaving(false);
-    setTripPrompt(null);
-
-    showToast(
-      'Trip logged successfully',
-      'success'
-    );
+    try {
+      await TripAPI.update(tripPrompt.trip.id, {
+        origin: tripForm.origin.trim(),
+        destination: tripForm.destination.trim(),
+        cargoType: tripForm.cargoType.trim(),
+        cargoDescription: tripForm.cargoDescription.trim(),
+        cargoWeightKg: tripForm.cargoWeightKg === '' ? null : Number(tripForm.cargoWeightKg),
+        plannedDistanceKm: tripForm.plannedDistanceKm === '' ? null : Number(tripForm.plannedDistanceKm),
+        agreedPayment: tripForm.agreedPayment === '' ? 0 : Number(tripForm.agreedPayment),
+        fuelPricePerLitre: tripForm.fuelPricePerLitre === '' ? null : Number(tripForm.fuelPricePerLitre),
+        notes: tripForm.notes.trim(),
+      });
+      setTripPrompt(null);
+      showToast('Trip logged and activated', 'success');
+    } catch (err) {
+      showToast(err.response?.data?.message || 'Could not save trip', 'error');
+    } finally {
+      setTripSaving(false);
+    }
   }
 
   const activeVehicles =
@@ -720,42 +628,8 @@ export default function Dashboard() {
         </div>
 
         <div className="form-group">
-          <label
-            className="form-label"
-            htmlFor="trip-purpose"
-          >
-            Trip purpose
-          </label>
-
-          <select
-            id="trip-purpose"
-            className="form-input"
-            value={
-              tripForm.purpose
-            }
-            onChange={(event) =>
-              updateTripField(
-                'purpose',
-                event.target.value
-              )
-            }
-          >
-            <option>
-              Freight delivery
-            </option>
-            <option>
-              Collection
-            </option>
-            <option>
-              Transfer
-            </option>
-            <option>
-              Return trip
-            </option>
-            <option>
-              Other
-            </option>
-          </select>
+          <label className="form-label" htmlFor="trip-cargo-type">Cargo type</label>
+          <input id="trip-cargo-type" className="form-input" value={tripForm.cargoType} onChange={(event) => updateTripField('cargoType', event.target.value)} />
         </div>
 
         <div className="form-group">
@@ -805,6 +679,21 @@ export default function Dashboard() {
               )
             }
           />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label" htmlFor="trip-distance">Planned distance (km)</label>
+          <input id="trip-distance" type="number" min="0" className="form-input" value={tripForm.plannedDistanceKm} onChange={(event) => updateTripField('plannedDistanceKm', event.target.value)} />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label" htmlFor="trip-revenue">Agreed payment / revenue (MWK)</label>
+          <input id="trip-revenue" type="number" min="0" className="form-input" value={tripForm.agreedPayment} onChange={(event) => updateTripField('agreedPayment', event.target.value)} />
+        </div>
+
+        <div className="form-group">
+          <label className="form-label" htmlFor="trip-fuel-price">Fuel price per litre (MWK)</label>
+          <input id="trip-fuel-price" type="number" min="0" className="form-input" value={tripForm.fuelPricePerLitre} onChange={(event) => updateTripField('fuelPricePerLitre', event.target.value)} />
         </div>
 
         <div
