@@ -1,0 +1,49 @@
+{
+  "backendUrl": "http://localhost:5000",
+  "tickIntervalSeconds": 5,
+  "movementMultiplier": 15,
+  "routePauseTicks": 2,
+  "theftIntervalMinutes": 3,
+  "refuelIntervalMinutes": 7,
+  "overspeedIntervalSeconds": 60,
+  "overspeedDurationSeconds": 20,
+  "overweightIntervalSeconds": 90,
+  "overweightDurationSeconds": 25,
+  "overweightFactor": 1.18,
+  "route": "M1 Lilongwe–Blantyre",
+  "trucks": [
+    {
+      "deviceId": "ESP32-001",
+      "licensePlate": "NA 1001",
+      "tankCapacity": 400,
+      "startFuelPercent": 90,
+      "baseEfficiencyKmPerL": 3.3,
+      "cruiseSpeedKmh": 68,
+      "speedLimitKmh": 80,
+      "maxPayloadKg": 30000,
+      "normalLoadWeightKg": 22000
+    },
+    {
+      "deviceId": "ESP32-002",
+      "licensePlate": "NA 1002",
+      "tankCapacity": 450,
+      "startFuelPercent": 75,
+      "baseEfficiencyKmPerL": 3.1,
+      "cruiseSpeedKmh": 72,
+      "speedLimitKmh": 80,
+      "maxPayloadKg": 28000,
+      "normalLoadWeightKg": 20500
+    },
+    {
+      "deviceId": "ESP32-003",
+      "licensePlate": "NA 1003",
+      "tankCapacity": 380,
+      "startFuelPercent": 60,
+      "baseEfficiencyKmPerL": 3.5,
+      "cruiseSpeedKmh": 65,
+      "speedLimitKmh": 70,
+      "maxPayloadKg": 25000,
+      "normalLoadWeightKg": 18500
+    }
+  ]
+}

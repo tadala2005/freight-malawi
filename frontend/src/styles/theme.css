@@ -1,0 +1,52 @@
+:root {
+  /* Primary palette */
+  --fm-navy: #0B2A4A;
+  --fm-navy-hover: #12365B;
+  --fm-navy-tint: #E7ECF2;
+  --fm-teal: #12877F;
+  --fm-teal-tint: #E6F3F2;
+  --fm-red: #CE1126;
+  --fm-red-tint: #FBEAEC;
+  --fm-white: #FFFFFF;
+  --fm-ink: #1C1C1C;
+
+  /* Supporting */
+  --fm-border: #D6DCE4;
+  --fm-muted: #5A6B7B;
+  --fm-bg: #F4F6F9;
+  --fm-warning: #9C6B12;      /* muted warning tone derived from the approved palette */
+  --fm-warning-tint: #FBF3E6;
+
+  /* Surfaces */
+  --fm-surface: var(--fm-white);
+
+  /* Type scale */
+  --fm-text-xs: 12px;
+  --fm-text-sm: 14px;
+  --fm-text-md: 16px;
+  --fm-text-lg: 20px;
+  --fm-text-xl: 24px;
+  --fm-text-2xl: 32px;
+
+  /* Fonts */
+  --fm-font-ui: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --fm-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+
+  /* Radius */
+  --fm-radius-control: 6px;
+  --fm-radius-card: 8px;
+
+  /* Control heights */
+  --fm-control-sm: 32px;
+  --fm-control-md: 40px;
+  --fm-control-lg: 48px;
+
+  /* Motion */
+  --fm-duration-fast: 150ms;
+  --fm-duration-base: 250ms;
+
+  /* Layout */
+  --fm-sidebar-width: 240px;
+  --fm-sidebar-width-collapsed: 64px;
+  --fm-header-height: 64px;
+}

@@ -1,0 +1,12 @@
+import React from 'react';
+
+export default function LogoIcon({ size = 32 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Freight Malawi">
+      <rect width="64" height="64" rx="12" fill="#0B2A4A" />
+      <path d="M10 44 L26 30 L36 38 L54 18" stroke="#12877F" strokeWidth="4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M46 34 C46 26 40 20 34 20 C28 20 22 26 22 34 C22 42 34 52 34 52 C34 52 46 42 46 34 Z" fill="#FFFFFF" />
+      <circle cx="34" cy="34" r="6" fill="#CE1126" />
+    </svg>
+  );
+}

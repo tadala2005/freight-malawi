@@ -1,0 +1,12 @@
+{
+  "name": "freight-malawi-simulator",
+  "version": "1.0.0",
+  "description": "Telemetry simulator for the Freight Malawi platform — stands in for ESP32 hardware",
+  "main": "simulate.js",
+  "scripts": {
+    "start": "node simulate.js"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.7.5"
+  }
+}
