@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Environment files (never commit real secrets)
+.env
+.env.local
+backend/.env
+frontend/.env
+simulator/.env
+
+# Build output
+frontend/dist/
+frontend/.vite/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Arduino
+hardware/build/
+*.elf
+*.bin

@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: freight-malawi-api
+    runtime: node
+    plan: free
+    rootDir: backend
+    buildCommand: npm install --no-audit --no-fund
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DB_CLIENT
+        value: postgres
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL
+        value: "true"
+      - key: DATABASE_POOL_MAX
+        value: 10
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES
+        value: 7d
+      - key: CORS_ORIGINS
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: API_BASE_URL
+        sync: false
+      - key: DEVICE_OFFLINE_THRESHOLD_SECONDS
+        value: 60

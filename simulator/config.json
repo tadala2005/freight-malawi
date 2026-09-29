@@ -1,0 +1,34 @@
+{
+  "backendUrl": "http://localhost:5000",
+  "telemetryIntervalMs": 2000,
+  "simulationTimeScale": 30,
+  "vehicles": [
+    {
+      "deviceId": "ESP32-001",
+      "deviceKey": "demo-key-001",
+      "licensePlate": "NA 1001",
+      "tankCapacity": 400,
+      "payloadCapacity": 12000,
+      "overspeedThresholdKmh": 80,
+      "scenario": "NORMAL"
+    },
+    {
+      "deviceId": "ESP32-002",
+      "deviceKey": "demo-key-002",
+      "licensePlate": "NA 1002",
+      "tankCapacity": 450,
+      "payloadCapacity": 15000,
+      "overspeedThresholdKmh": 80,
+      "scenario": "FUEL_THEFT"
+    },
+    {
+      "deviceId": "ESP32-003",
+      "deviceKey": "demo-key-003",
+      "licensePlate": "NA 1003",
+      "tankCapacity": 350,
+      "payloadCapacity": 10000,
+      "overspeedThresholdKmh": 80,
+      "scenario": "AGGRESSIVE_DRIVER"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+-- Freight Malawi
+--
+-- The production database is now PostgreSQL/Supabase and schema.sql is the
+-- canonical schema. The old file was a MySQL-only dynamic migration and is
+-- intentionally no longer executed.
+--
+-- For a new deployment:
+--   1. Create a Supabase PostgreSQL database.
+--   2. Run ../schema.sql (the repository root schema.sql) in Supabase SQL Editor.
+--
+-- Existing MySQL installations can remain on their old migration path only
+-- as legacy local-development environments. Do not run this file against
+-- PostgreSQL.

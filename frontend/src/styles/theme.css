@@ -1,0 +1,48 @@
+:root {
+  --fm-bg-primary: #07111F;
+  --fm-bg-secondary: #0D1B2A;
+  --fm-card: #13263A;
+  --fm-primary: #00D4AA;
+  --fm-cyan: #22D3EE;
+  --fm-warning: #F59E0B;
+  --fm-danger: #FF4D5F;
+  --fm-success: #22C55E;
+  --fm-text: #F8FAFC;
+  --fm-text-secondary: #94A3B8;
+  --fm-border: #24364A;
+
+  /* Compatibility aliases used by the existing components. */
+  --fm-navy: var(--fm-bg-primary);
+  --fm-navy-hover: #10263A;
+  --fm-navy-tint: #1C344B;
+  --fm-teal: var(--fm-primary);
+  --fm-teal-tint: rgba(0, 212, 170, 0.14);
+  --fm-red: var(--fm-danger);
+  --fm-red-tint: rgba(255, 77, 95, 0.14);
+  --fm-white: var(--fm-text);
+  --fm-ink: var(--fm-text);
+  --fm-muted: var(--fm-text-secondary);
+  --fm-surface: var(--fm-card);
+  --fm-background: var(--fm-bg-primary);
+  --fm-success-tint: rgba(34, 197, 94, 0.14);
+  --fm-warning-tint: rgba(245, 158, 11, 0.14);
+  --fm-critical: var(--fm-danger);
+  --fm-critical-tint: rgba(255, 77, 95, 0.14);
+
+  --fm-font-sans: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --fm-font-mono: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --fm-fs-xs: 12px;
+  --fm-fs-sm: 14px;
+  --fm-fs-md: 16px;
+  --fm-fs-lg: 20px;
+  --fm-fs-xl: 24px;
+  --fm-fs-2xl: 32px;
+
+  --fm-radius-sm: 8px;
+  --fm-radius-md: 12px;
+  --fm-radius-lg: 16px;
+  --fm-shadow-sm: 0 10px 30px rgba(0, 0, 0, 0.18);
+  --fm-shadow-md: 0 16px 40px rgba(0, 0, 0, 0.25);
+  --fm-header-height: 64px;
+  --fm-sidebar-width: 248px;
+}
