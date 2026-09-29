@@ -1,5 +1,5 @@
 {
-  "backendUrl": "http://localhost:5000",
+  "backendUrl": "https://freight-malawi.onrender.com",
   "telemetryIntervalMs": 2000,
   "simulationTimeScale": 30,
   "vehicles": [

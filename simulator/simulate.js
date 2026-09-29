@@ -1,20 +1,3 @@
-// FREIGHT MALAWI SIMULATOR
-//
-// Virtual devices continuously report GPS and vehicle state.
-// Movement itself is controlled by the Dashboard ignition switch.
-//
-// The simulation is accelerated for demonstration purposes, but:
-//   - route distance is based on road kilometres
-//   - odometer increases by actual simulated kilometres
-//   - fuel falls according to kilometres travelled
-//   - load affects fuel consumption
-//   - aggressive driving increases consumption
-//   - overspeeding increases consumption
-//
-// A Blantyre -> Lilongwe M1 trip therefore finishes at exactly 305 km
-// instead of the shorter straight-line/sparse-waypoint distance.
-// ============================================================================
-
 const fs = require('fs');
 const path = require('path');
 const { io } = require('socket.io-client');
@@ -25,7 +8,8 @@ const {
   offsetPerpendicular,
 } = require('./routes');
 
-const scenarios = require('./scenarios');
+const scenarios =
+  require('./scenarios');
 
 const configPath =
   path.join(
@@ -42,20 +26,23 @@ const config =
   );
 
 const BACKEND_URL =
-  process.env.BACKEND_URL ||
-  config.backendUrl ||
-  'http://localhost:5000';
+  (
+    process.env.BACKEND_URL ||
+    process.env.SIMULATOR_BACKEND_URL ||
+    config.backendUrl ||
+    'http://localhost:5000'
+  ).replace(
+    /\/$/,
+    '',
+  );
 
 const INTERVAL_MS =
   Number(
     process.env.TELEMETRY_INTERVAL_MS ||
       config.telemetryIntervalMs ||
-      5000,
+      2000,
   );
 
-// 30x means:
-// 5 real seconds = 150 simulated seconds.
-// This lets a full M1 journey be demonstrated in minutes rather than hours.
 const TIME_SCALE =
   Number(
     process.env.SIMULATION_TIME_SCALE ||
@@ -64,18 +51,24 @@ const TIME_SCALE =
   );
 
 const FALLBACK_ROUTE =
-  'M1_LILONGWE_BLANTYRE';
+  'BLANTYRE_LILONGWE';
 
 const IDLE_CONSUMPTION_L_PER_HOUR =
   1.4;
 
-// ---------------------------------------------------------------------------
-// Fuel-consumption model
-//
-// Volvo's guidance for a full-load regional truck is approximately
-// 30-40 L/100 km. This model stays within that broad range while applying
-// practical adjustments for load, speed and driving behaviour.
-// ---------------------------------------------------------------------------
+function clamp(
+  value,
+  min,
+  max,
+) {
+  return Math.max(
+    min,
+    Math.min(
+      max,
+      value,
+    ),
+  );
+}
 
 function fuelConsumptionLPer100Km({
   speedKmh,
@@ -102,44 +95,41 @@ function fuelConsumptionLPer100Km({
     ) / 1000;
 
   const loadRatio =
-    Math.max(
+    clamp(
+      cargoTonnes /
+        capacityTonnes,
       0,
-      Math.min(
-        1.25,
-        cargoTonnes /
-          capacityTonnes,
-      ),
+      1.25,
     );
 
-  // Base regional-truck consumption.
-  // 12,000 kg load => approximately 35.4 L/100 km before route/speed factors.
   let consumption =
     30 +
     cargoTonnes *
       0.45;
 
-  // Overloading penalty.
   if (
     loadRatio > 1
   ) {
     consumption +=
-      (loadRatio - 1) *
+      (
+        loadRatio - 1
+      ) *
       8;
   }
 
-  // Higher aerodynamic drag at higher road speed.
   if (
     speedKmh > 75
   ) {
     consumption +=
       Math.min(
         5,
-        (speedKmh - 75) *
+        (
+          speedKmh - 75
+        ) *
           0.08,
       );
   }
 
-  // Stop/start traffic.
   if (
     speedKmh > 0 &&
     speedKmh < 45
@@ -147,7 +137,6 @@ function fuelConsumptionLPer100Km({
     consumption += 1.5;
   }
 
-  // Approximate extra effort through part of the central highland corridor.
   if (
     progressFraction >= 0.55 &&
     progressFraction <= 0.78
@@ -155,7 +144,6 @@ function fuelConsumptionLPer100Km({
     consumption *= 1.05;
   }
 
-  // Aggressive driving penalty.
   if (
     scenario ===
     'AGGRESSIVE_DRIVER'
@@ -163,20 +151,17 @@ function fuelConsumptionLPer100Km({
     consumption += 1.5;
   }
 
-  // Sustained high-speed driving penalty.
   if (
     scenario ===
     'OVERSPEEDING'
   ) {
-    consumption += 1.0;
+    consumption += 1;
   }
 
-  return Math.max(
+  return clamp(
+    consumption,
     28,
-    Math.min(
-      43,
-      consumption,
-    ),
+    43,
   );
 }
 
@@ -184,9 +169,11 @@ class VehicleSimulator {
   constructor(cfg) {
     this.cfg = cfg;
 
-    this.routeKey = null;
+    this.routeKey =
+      null;
 
-    this.progressKm = 0;
+    this.progressKm =
+      0;
 
     this.odometerKm =
       12000 +
@@ -195,7 +182,8 @@ class VehicleSimulator {
           5000,
       );
 
-    this.engineHours = 0;
+    this.engineHours =
+      0;
 
     this.tankCapacity =
       Number(
@@ -211,14 +199,14 @@ class VehicleSimulator {
       ) *
       this.tankCapacity;
 
-    this.ignitionOn = false;
+    this.ignitionOn =
+      false;
 
-    // A newly prepared trip must publish an origin/ignition packet before
-    // any kilometres are applied. This makes the trip start odometer the
-    // true origin value and guarantees the M1 journey closes at exactly 305 km.
-    this.pendingInitialTelemetry = false;
+    this.pendingInitialTelemetry =
+      false;
 
-    this.tickIndex = 0;
+    this.tickIndex =
+      0;
 
     this.state = {};
 
@@ -233,13 +221,18 @@ class VehicleSimulator {
     this.lastKnownPosition =
       null;
 
-    this.bootstrapped = false;
+    this.bootstrapped =
+      false;
 
-    this.socket = null;
+    this.socket =
+      null;
 
-    this.interval = null;
+    this.interval =
+      null;
 
-    this.log = (...args) =>
+    this.log = (
+      ...args
+    ) =>
       console.log(
         `[${cfg.licensePlate}]`,
         ...args,
@@ -247,6 +240,10 @@ class VehicleSimulator {
   }
 
   connect() {
+    this.log(
+      `connecting to ${BACKEND_URL}`,
+    );
+
     this.socket =
       io(
         `${BACKEND_URL}/device`,
@@ -261,12 +258,22 @@ class VehicleSimulator {
                 .deviceKey,
           },
 
-          reconnection: true,
+          transports: [
+            'websocket',
+            'polling',
+          ],
+
+          reconnection:
+            true,
 
           reconnectionDelay:
             2000,
 
-          timeout: 8000,
+          reconnectionDelayMax:
+            10000,
+
+          timeout:
+            10000,
         },
       );
 
@@ -274,14 +281,21 @@ class VehicleSimulator {
       'connect',
       () => {
         this.log(
-          'connected; waiting for Dashboard ignition command',
+          `CONNECTED to ${BACKEND_URL}`,
+        );
+
+        this.log(
+          'waiting for Dashboard ignition command',
         );
       },
     );
 
     this.socket.on(
       'device:state',
-      ({ reading, trip }) => {
+      ({
+        reading,
+        trip,
+      }) => {
         if (reading) {
           this.lastKnownPosition =
             {
@@ -293,10 +307,11 @@ class VehicleSimulator {
                 reading.longitude,
               ),
 
-              heading: Number(
-                reading.heading ||
-                  0,
-              ),
+              heading:
+                Number(
+                  reading.heading ||
+                    0,
+                ),
             };
 
           if (
@@ -373,10 +388,11 @@ class VehicleSimulator {
       'control:ignition',
       (command = {}) => {
         const nextIgnition =
-          !!command.ignition_on;
+          Boolean(
+            command.ignition_on,
+          );
 
         if (
-          nextIgnition &&
           command.route_key
         ) {
           this.routeKey =
@@ -384,9 +400,8 @@ class VehicleSimulator {
         }
 
         if (
-          nextIgnition &&
           command.cargo_weight_kg !=
-            null
+          null
         ) {
           this.cargoWeightKg =
             scenarios.cargoWeightForScenario(
@@ -400,7 +415,6 @@ class VehicleSimulator {
             );
         }
 
-        // Starting a PENDING_DETAILS trip creates a fresh virtual journey.
         if (
           nextIgnition &&
           command.new_trip
@@ -410,42 +424,53 @@ class VehicleSimulator {
 
           this.state = {};
 
-          this.tickIndex = 0;
+          this.tickIndex =
+            0;
 
-          this.ignitionOn =
-            false;
-
-          this.pendingInitialTelemetry = true;
-
-          const origin =
-            positionAtDistance(
-              this.routeKey ||
-                FALLBACK_ROUTE,
-              0,
-            );
+          this.pendingInitialTelemetry =
+            true;
 
           this.lastKnownPosition =
-            {
-              lat:
-                origin.lat,
-              lng:
-                origin.lng,
-              heading:
-                origin.heading,
-            };
+            null;
+
+          if (
+            this.routeKey
+          ) {
+            const origin =
+              positionAtDistance(
+                this.routeKey,
+                0,
+              );
+
+            this.lastKnownPosition =
+              {
+                lat:
+                  origin.lat,
+
+                lng:
+                  origin.lng,
+
+                heading:
+                  origin.heading,
+              };
+          }
+
+          this.log(
+            `NEW TRIP command received: ${this.routeKey || 'NO ROUTE'}`,
+          );
+
+          this.log(
+            `Cargo weight: ${this.cargoWeightKg} kg`,
+          );
         }
 
         this.ignitionOn =
           nextIgnition;
 
         this.log(
-          nextIgnition
-            ? `IGNITION ON${
-                this.routeKey
-                  ? ` · ${this.routeKey}`
-                  : ''
-              }`
-            : 'IGNITION OFF · GPS tracking remains active',
+          this.ignitionOn
+            ? 'IGNITION ON'
+            : 'IGNITION OFF',
         );
 
         this.tick();
@@ -454,21 +479,29 @@ class VehicleSimulator {
 
     this.socket.on(
       'connect_error',
-      (err) => {
+      (error) => {
         this.log(
-          'connection error:',
-          err.message,
+          `connection error: ${error.message}`,
         );
 
         if (
           String(
-            err.message,
+            error.message,
           ).includes(
             'DEVICE_UNAUTHORIZED',
           )
         ) {
           this.log(
-            'Run: cd backend && node scripts/provisionSimulatorDevices.js',
+            'DEVICE UNAUTHORIZED: run backend npm run provision against the SAME production Supabase database.',
+          );
+        }
+
+        if (
+          error.message ===
+          'ECONNREFUSED'
+        ) {
+          this.log(
+            `Cannot reach ${BACKEND_URL}`,
           );
         }
       },
@@ -478,73 +511,79 @@ class VehicleSimulator {
       'disconnect',
       (reason) => {
         this.log(
-          'disconnected:',
-          reason,
+          `DISCONNECTED: ${reason}`,
         );
       },
     );
   }
 
   currentPosition() {
-    if (!this.routeKey) {
-      if (
-        this.lastKnownPosition
-      ) {
-        return this.lastKnownPosition;
-      }
-
-      const fallback =
+    if (
+      this.routeKey
+    ) {
+      let position =
         positionAtDistance(
-          FALLBACK_ROUTE,
-          0,
+          this.routeKey,
+          this.progressKm,
         );
 
-      return {
-        lat: fallback.lat,
-        lng: fallback.lng,
-        heading:
-          fallback.heading,
-      };
+      const totalKm =
+        totalDistanceKm(
+          this.routeKey,
+        );
+
+      const fraction =
+        totalKm > 0
+          ? clamp(
+              this.progressKm /
+                totalKm,
+              0,
+              1,
+            )
+          : 0;
+
+      if (
+        scenarios.isDeviating(
+          this.cfg.scenario,
+          fraction,
+        )
+      ) {
+        position = {
+          ...position,
+          ...offsetPerpendicular(
+            position.lat,
+            position.lng,
+            position.heading,
+            8,
+          ),
+        };
+      }
+
+      return position;
     }
-
-    let position =
-      positionAtDistance(
-        this.routeKey,
-        this.progressKm,
-      );
-
-    const totalKm =
-      totalDistanceKm(
-        this.routeKey,
-      );
-
-    const fraction =
-      totalKm > 0
-        ? Math.min(
-            1,
-            this.progressKm /
-              totalKm,
-          )
-        : 0;
 
     if (
-      scenarios.isDeviating(
-        this.cfg.scenario,
-        fraction,
-      )
+      this.lastKnownPosition
     ) {
-      position = {
-        ...position,
-        ...offsetPerpendicular(
-          position.lat,
-          position.lng,
-          position.heading,
-          8,
-        ),
-      };
+      return this.lastKnownPosition;
     }
 
-    return position;
+    const fallback =
+      positionAtDistance(
+        FALLBACK_ROUTE,
+        0,
+      );
+
+    return {
+      lat:
+        fallback.lat,
+
+      lng:
+        fallback.lng,
+
+      heading:
+        fallback.heading,
+    };
   }
 
   tick() {
@@ -562,15 +601,15 @@ class VehicleSimulator {
       'NORMAL';
 
     const virtualDtHours =
-      (INTERVAL_MS / 1000) *
+      (
+        INTERVAL_MS /
+        1000
+      ) *
       TIME_SCALE /
       3600;
 
-    const routeAvailable =
-      !!this.routeKey;
-
     const totalKm =
-      routeAvailable
+      this.routeKey
         ? totalDistanceKm(
             this.routeKey,
           )
@@ -581,27 +620,28 @@ class VehicleSimulator {
     let distanceThisTick =
       0;
 
-    // -----------------------------------------------------------------------
-    // Move the virtual truck
-    // -----------------------------------------------------------------------
+    const publishOriginOnly =
+      this
+        .pendingInitialTelemetry;
 
-    const publishOriginOnly = this.pendingInitialTelemetry;
-    this.pendingInitialTelemetry = false;
+    this.pendingInitialTelemetry =
+      false;
 
     if (
       !publishOriginOnly &&
       this.ignitionOn &&
-      routeAvailable &&
+      this.routeKey &&
       totalKm > 0
     ) {
       const beforeKm =
         this.progressKm;
 
       const fraction =
-        Math.min(
-          1,
+        clamp(
           beforeKm /
             totalKm,
+          0,
+          1,
         );
 
       speed =
@@ -626,9 +666,6 @@ class VehicleSimulator {
             requestedDistanceKm,
         );
 
-      // IMPORTANT:
-      // Use actual applied movement, not requested movement.
-      // This prevents the final packet from adding extra kilometres.
       distanceThisTick =
         Math.max(
           0,
@@ -644,31 +681,20 @@ class VehicleSimulator {
 
       this.engineHours +=
         virtualDtHours;
-
-      if (
-        this.progressKm >=
-        totalKm
-      ) {
-        this.progressKm =
-          totalKm;
-      }
     }
 
     const progressFraction =
       totalKm > 0
-        ? Math.min(
-            1,
+        ? clamp(
             this.progressKm /
               totalKm,
+            0,
+            1,
           )
         : 0;
 
     let position =
       this.currentPosition();
-
-    // -----------------------------------------------------------------------
-    // Fuel model
-    // -----------------------------------------------------------------------
 
     const consumption =
       fuelConsumptionLPer100Km(
@@ -697,8 +723,8 @@ class VehicleSimulator {
       );
 
     if (
-      speed === 0 &&
-      this.ignitionOn
+      this.ignitionOn &&
+      speed === 0
     ) {
       fuelDelta -=
         IDLE_CONSUMPTION_L_PER_HOUR *
@@ -713,65 +739,69 @@ class VehicleSimulator {
       );
 
     this.fuelLitres =
-      Math.max(
+      clamp(
+        this.fuelLitres +
+          fuelDelta,
         0,
-        Math.min(
-          this.tankCapacity,
-          this.fuelLitres +
-            fuelDelta,
-        ),
+        this.tankCapacity,
       );
 
-    // Destination reached.
     if (
       this.progressKm >=
         totalKm &&
-      totalKm > 0 &&
-      this.ignitionOn
+      totalKm > 0
     ) {
+      this.progressKm =
+        totalKm;
+
       speed = 0;
 
       this.ignitionOn =
         false;
 
       this.state
-        .currentSpeedKmh = 0;
+        .currentSpeedKmh =
+        0;
 
       position =
         positionAtDistance(
           this.routeKey,
           totalKm,
         );
+
+      this.log(
+        `DESTINATION REACHED: ${totalKm.toFixed(
+          1,
+        )} km`,
+      );
     }
 
-    // Keep the latest physical position even when the truck is OFFLINE or
-    // ignition is OFF.
-    this.lastKnownPosition =
-      {
-        lat: position.lat,
-        lng: position.lng,
-        heading:
-          position.heading ||
-          this.lastKnownPosition
-            ?.heading ||
-          0,
-      };
+    if (
+      position
+    ) {
+      this.lastKnownPosition =
+        {
+          lat:
+            position.lat,
 
-    this.cargoWeightKg =
-      scenarios.cargoWeightForScenario(
-        scenario,
-        this.cfg
-          .payloadCapacity ||
-          12000,
-        this.cargoWeightKg,
-      );
+          lng:
+            position.lng,
+
+          heading:
+            position.heading ||
+            0,
+        };
+    }
 
     const fuelPercent =
-      (
-        this.fuelLitres /
-        this.tankCapacity
-      ) *
-      100;
+      this.tankCapacity >
+      0
+        ? (
+            this.fuelLitres /
+            this.tankCapacity
+          ) *
+          100
+        : 0;
 
     const payload = {
       device_id:
@@ -785,14 +815,20 @@ class VehicleSimulator {
 
       latitude:
         Number(
-          this.lastKnownPosition
-            .lat.toFixed(6),
+          (
+            this
+              .lastKnownPosition
+              ?.lat || 0
+          ).toFixed(6),
         ),
 
       longitude:
         Number(
-          this.lastKnownPosition
-            .lng.toFixed(6),
+          (
+            this
+              .lastKnownPosition
+              ?.lng || 0
+          ).toFixed(6),
         ),
 
       speed:
@@ -805,23 +841,26 @@ class VehicleSimulator {
 
       heading:
         Number(
-          this.lastKnownPosition
-            .heading.toFixed(1),
+          (
+            this
+              .lastKnownPosition
+              ?.heading || 0
+          ).toFixed(1),
         ),
 
       fuel_level_litres:
         Number(
-          this.fuelLitres.toFixed(2),
+          this.fuelLitres.toFixed(
+            2,
+          ),
         ),
 
       fuel_percent:
         Number(
-          Math.max(
+          clamp(
+            fuelPercent,
             0,
-            Math.min(
-              100,
-              fuelPercent,
-            ),
+            100,
           ).toFixed(1),
         ),
 
@@ -860,9 +899,10 @@ class VehicleSimulator {
           !ack.success
         ) {
           this.log(
-            'telemetry rejected:',
-            ack?.message ||
-              'unknown error',
+            `telemetry rejected: ${
+              ack?.message ||
+              'unknown error'
+            }`,
           );
         }
       },
@@ -874,17 +914,24 @@ class VehicleSimulator {
 
     this.interval =
       setInterval(
-        () => this.tick(),
+        () =>
+          this.tick(),
         INTERVAL_MS,
       );
   }
 
   stop() {
-    clearInterval(
-      this.interval,
-    );
+    if (
+      this.interval
+    ) {
+      clearInterval(
+        this.interval,
+      );
+    }
 
-    if (this.socket) {
+    if (
+      this.socket
+    ) {
       this.socket.disconnect();
     }
   }
@@ -900,15 +947,23 @@ function main() {
   );
 
   console.log(
-    ` Backend: ${BACKEND_URL}   Interval: ${INTERVAL_MS}ms   Time scale: ${TIME_SCALE}x`,
+    ` Backend: ${BACKEND_URL}`,
   );
 
   console.log(
-    ' Mode: GPS reporting continuous; movement controlled by Dashboard ignition',
+    ` Interval: ${INTERVAL_MS}ms`,
   );
 
   console.log(
-    ' M1 Blantyre ↔ Lilongwe reference distance: 305 km',
+    ` Simulation time scale: ${TIME_SCALE}x`,
+  );
+
+  console.log(
+    ' Ignition: controlled from Dashboard',
+  );
+
+  console.log(
+    ' GPS: continuous device telemetry',
   );
 
   console.log(
@@ -923,7 +978,7 @@ function main() {
       0
   ) {
     console.error(
-      'No vehicles configured in simulator/config.json.',
+      'No simulator vehicles configured.',
     );
 
     process.exit(1);
@@ -957,9 +1012,24 @@ function main() {
       process.exit(0);
     },
   );
+
+  process.on(
+    'SIGTERM',
+    () => {
+      simulators.forEach(
+        (simulator) =>
+          simulator.stop(),
+      );
+
+      process.exit(0);
+    },
+  );
 }
 
-if (require.main === module) {
+if (
+  require.main ===
+  module
+) {
   main();
 }
 
