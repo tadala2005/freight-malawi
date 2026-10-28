@@ -50,6 +50,59 @@ const TIME_SCALE =
       30,
   );
 
+// ---------------------------------------------------------------------------
+// Device keys are generated automatically - nobody types them.
+// With DEVICE_KEY_SECRET set (production), each device's key is derived from
+// its device ID. backend/scripts/provisionSimulatorDevices.js derives the SAME
+// key and stores only its bcrypt hash in the database. Without the secret the
+// legacy deviceKey from config.json is used (local demo only).
+// deriveDeviceKey() must stay identical to the one in the provisioning script.
+// ---------------------------------------------------------------------------
+const crypto =
+  require('crypto');
+
+const DEVICE_KEY_SECRET =
+  String(
+    process.env.DEVICE_KEY_SECRET ||
+      '',
+  ).trim();
+
+function deriveDeviceKey(
+  secret,
+  deviceId,
+) {
+  return crypto
+    .createHmac(
+      'sha256',
+      String(secret),
+    )
+    .update(
+      `freight-malawi/device-key/v1/${deviceId}`,
+    )
+    .digest(
+      'base64url',
+    );
+}
+
+function resolveDeviceKey(
+  vehicleCfg,
+) {
+  if (
+    DEVICE_KEY_SECRET
+  ) {
+    return deriveDeviceKey(
+      DEVICE_KEY_SECRET,
+      vehicleCfg.deviceId,
+    );
+  }
+
+  return vehicleCfg.deviceKey
+    ? String(
+        vehicleCfg.deviceKey,
+      )
+    : '';
+}
+
 const FALLBACK_ROUTE =
   'BLANTYRE_LILONGWE';
 
@@ -492,7 +545,7 @@ class VehicleSimulator {
           )
         ) {
           this.log(
-            'DEVICE UNAUTHORIZED: run backend npm run provision against the SAME production Supabase database.',
+            'DEVICE UNAUTHORIZED: the backend database has no matching key hash. Run backend provisioning with --apply against the SAME Supabase database as Render, and make sure DEVICE_KEY_SECRET here equals the one in backend/.env.',
           );
         }
 
@@ -984,12 +1037,49 @@ function main() {
     process.exit(1);
   }
 
+  if (
+    DEVICE_KEY_SECRET &&
+    DEVICE_KEY_SECRET.length <
+      32
+  ) {
+    console.error(
+      'DEVICE_KEY_SECRET is set but shorter than 32 characters. Use the value from backend/.env.',
+    );
+
+    process.exit(1);
+  }
+
+  console.log(
+    DEVICE_KEY_SECRET
+      ? ' Device keys: derived automatically from DEVICE_KEY_SECRET'
+      : ' Device keys: config.json deviceKey (legacy demo keys; set DEVICE_KEY_SECRET for production)',
+  );
+
   const simulators =
     config.vehicles.map(
-      (vehicle) =>
-        new VehicleSimulator(
-          vehicle,
-        ),
+      (vehicle) => {
+        const deviceKey =
+          resolveDeviceKey(
+            vehicle,
+          );
+
+        if (
+          !deviceKey
+        ) {
+          console.error(
+            `No device key for ${vehicle.deviceId}: set DEVICE_KEY_SECRET on this service.`,
+          );
+
+          process.exit(1);
+        }
+
+        return new VehicleSimulator(
+          {
+            ...vehicle,
+            deviceKey,
+          },
+        );
+      },
     );
 
   simulators.forEach(
@@ -1034,6 +1124,8 @@ if (
 }
 
 module.exports = {
+  deriveDeviceKey,
+  resolveDeviceKey,
   VehicleSimulator,
   fuelConsumptionLPer100Km,
   BACKEND_URL,
