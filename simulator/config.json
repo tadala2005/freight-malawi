@@ -1,3 +1,4 @@
+
 {
   "backendUrl": "https://freight-malawi.onrender.com",
   "telemetryIntervalMs": 2000,
@@ -5,7 +6,6 @@
   "vehicles": [
     {
       "deviceId": "ESP32-001",
-      "deviceKey": "demo-key-001",
       "licensePlate": "NA 1001",
       "tankCapacity": 400,
       "payloadCapacity": 12000,
@@ -14,7 +14,6 @@
     },
     {
       "deviceId": "ESP32-002",
-      "deviceKey": "demo-key-002",
       "licensePlate": "NA 1002",
       "tankCapacity": 450,
       "payloadCapacity": 15000,
@@ -23,7 +22,6 @@
     },
     {
       "deviceId": "ESP32-003",
-      "deviceKey": "demo-key-003",
       "licensePlate": "NA 1003",
       "tankCapacity": 350,
       "payloadCapacity": 10000,
