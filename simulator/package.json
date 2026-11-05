@@ -1,3 +1,4 @@
+
 {
   "name": "freight-malawi-simulator",
   "version": "1.0.0",
@@ -5,12 +6,12 @@
   "description": "Multi-vehicle Malawi fleet telemetry simulator for the Freight Malawi platform",
   "main": "simulate.js",
   "scripts": {
-    "start": "node simulate.js"
+    "start": "node render-server.js"
   },
   "dependencies": {
     "socket.io-client": "^4.7.5"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=18.18.0"
   }
 }
