@@ -1,0 +1,118 @@
+
+name: Provision Freight Malawi Simulator Devices
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Update device credentials in Supabase?"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: freight-malawi-device-provision
+  cancel-in-progress: false
+
+jobs:
+  provision:
+    name: Verify and Provision Devices
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      NODE_ENV: production
+      DB_CLIENT: postgres
+      DATABASE_SSL: "true"
+      DATABASE_URL: ${{ secrets.FREIGHT_DATABASE_URL }}
+      DEVICE_KEY_SECRET: ${{ secrets.FREIGHT_DEVICE_KEY_SECRET }}
+      BACKEND_URL: https://freight-malawi.onrender.com
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Verify secrets are configured
+        shell: bash
+        run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "ERROR: FREIGHT_DATABASE_URL is missing."
+            exit 1
+          fi
+
+          if [ -z "$DEVICE_KEY_SECRET" ]; then
+            echo "ERROR: FREIGHT_DEVICE_KEY_SECRET is missing."
+            exit 1
+          fi
+
+          node -e '
+          if (Buffer.byteLength(
+            process.env.DEVICE_KEY_SECRET, "utf8"
+          ) < 32) {
+            throw new Error("Device secret is too short");
+          }
+          console.log("Required secrets are configured.");
+          '
+
+      - name: Install backend dependencies
+        run: npm ci --prefix backend
+
+      - name: Install simulator dependencies
+        run: npm ci --prefix simulator
+
+      - name: Validate JavaScript syntax
+        run: |
+          node --check backend/scripts/provisionSimulatorDevices.js
+          node --check simulator/simulate.js
+          node --check backend/config/db.js
+
+      - name: Verify identical device key generation
+        run: |
+          node - <<'NODE'
+          const backend = require(
+            './backend/scripts/provisionSimulatorDevices'
+          );
+          const simulator = require('./simulator/simulate');
+          const config = require('./simulator/config.json');
+
+          const secret = process.env.DEVICE_KEY_SECRET;
+
+          for (const vehicle of config.vehicles) {
+            const id = vehicle.deviceId;
+
+            const backendKey = backend.deriveDeviceKey(
+              secret, id
+            );
+
+            const simulatorKey = simulator.deriveDeviceKey(
+              secret, id
+            );
+
+            if (backendKey !== simulatorKey) {
+              throw new Error(`Device key mismatch: ${id}`);
+            }
+
+            console.log(`[PASS] ${id}: keys match`);
+          }
+
+          console.log('Device key verification successful.');
+          NODE
+
+      - name: Preview Supabase device credentials
+        if: ${{ !inputs.apply }}
+        run: npm run provision --prefix backend
+
+      - name: Update and verify Supabase credentials
+        if: ${{ inputs.apply }}
+        run: npm run provision --prefix backend -- --apply
