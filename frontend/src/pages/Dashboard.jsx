@@ -1,8 +1,18 @@
-import { useCallback, useEffect, useState } from 'react';
+
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Truck, Route as RouteIcon, Fuel, Gauge, Bell } from 'lucide-react';
+import {
+  Truck,
+  Route as RouteIcon,
+  Fuel,
+  Gauge,
+  Bell,
+  AlertTriangle
+} from 'lucide-react';
+
 import { useAuth } from '../context/AuthContext';
 import { vehicleApi, reportApi, alertApi } from '../api/endpoints';
+
 import KPICard from '../components/Dashboard/KPICard';
 import LiveMap from '../components/Dashboard/LiveMap';
 import { VehicleStatusBadge } from '../components/UI/Badge';
@@ -11,83 +21,317 @@ import EmptyState from '../components/UI/EmptyState';
 import AlertCard from '../components/Alerts/AlertCard';
 import IgnitionSwitch from '../components/Dashboard/IgnitionSwitch';
 
+const asNumber = (value, fallback = 0) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+
+function isReporting(vehicle) {
+  if (vehicle.current_status === 'OFFLINE') {
+    return false;
+  }
+
+  if (!vehicle.last_seen_at) {
+    return true;
+  }
+
+  const lastSeen = new Date(vehicle.last_seen_at).getTime();
+
+  return (
+    !Number.isFinite(lastSeen) ||
+    Date.now() - lastSeen < 90000
+  );
+}
+
 export default function Dashboard() {
   const { getSocket } = useAuth();
   const navigate = useNavigate();
+
   const [vehicles, setVehicles] = useState([]);
   const [summary, setSummary] = useState(null);
   const [recentAlerts, setRecentAlerts] = useState([]);
-  const [selectedVehicleId, setSelectedVehicleId] = useState(null);
   const [vehicleFilterId, setVehicleFilterId] = useState('');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [clock, setClock] = useState(Date.now());
 
   const loadAll = useCallback(async () => {
-    const [vehicleList, fleetSummary, alerts] = await Promise.all([
-      vehicleApi.list(),
-      reportApi.fleet(vehicleFilterId ? { vehicleId: vehicleFilterId } : undefined),
-      alertApi.list({ scope: 'active', limit: 6, ...(vehicleFilterId ? { vehicleId: vehicleFilterId } : {}) }),
-    ]);
-    setVehicles(vehicleList);
-    setSummary(fleetSummary);
-    setRecentAlerts(alerts);
-    setLoading(false);
+    try {
+      const params = vehicleFilterId
+        ? { vehicleId: vehicleFilterId }
+        : undefined;
+
+      const [
+        vehicleList,
+        fleetSummary,
+        alerts
+      ] = await Promise.all([
+        vehicleApi.list(),
+        reportApi.fleet(params),
+        alertApi.list({
+          scope: 'active',
+          acknowledged: false,
+          limit: 30,
+          ...(params || {})
+        })
+      ]);
+
+      setVehicles(
+        Array.isArray(vehicleList) ? vehicleList : []
+      );
+
+      setSummary(fleetSummary);
+
+      setRecentAlerts(
+        Array.isArray(alerts) ? alerts : []
+      );
+
+      setError('');
+    } catch (err) {
+      setError(
+        'Unable to refresh the dashboard. Check your backend connection.'
+      );
+
+      console.error('Dashboard refresh failed:', err);
+    } finally {
+      setLoading(false);
+    }
   }, [vehicleFilterId]);
 
-  useEffect(() => { loadAll(); }, [loadAll]);
-
+  // Initial loading and periodic reconciliation.
   useEffect(() => {
-    const socket = getSocket();
-    if (!socket) return undefined;
+    setSummary(null);
 
-    const onVehicleUpdate = (vehicle) => {
-      setVehicles((prev) => prev.map((v) => (v.id === vehicle.id ? { ...v, ...vehicle } : v)));
-    };
-    const onTelemetryUpdate = ({ vehicle_id, reading }) => {
-      setVehicles((prev) => prev.map((v) => (v.id === vehicle_id ? { ...v, latest_telemetry: reading } : v)));
-    };
-    const onAlertNew = (alert) => {
-      const matchesVehicleFilter = !vehicleFilterId || String(alert.vehicle_id) === String(vehicleFilterId);
-      if (!matchesVehicleFilter) return;
-      setRecentAlerts((prev) => [alert, ...prev].slice(0, 6));
-      setSummary((prev) => (prev ? { ...prev, open_alerts: prev.open_alerts + 1 } : prev));
-    };
-    const onTripUpdate = (trip) => {
-      setVehicles((prev) => prev.map((v) => (
-        v.id === trip.vehicle_id
-          ? { ...v, active_trip: ['COMPLETED', 'CANCELLED'].includes(trip.status) ? null : trip }
-          : v
-      )));
-    };
-    const onDeviceStatus = ({ vehicle_id, status }) => {
-      setVehicles((prev) => prev.map((v) => (v.id === vehicle_id ? { ...v, current_status: status } : v)));
-    };
+    loadAll();
 
-    socket.on('vehicle:update', onVehicleUpdate);
-    socket.on('telemetry:update', onTelemetryUpdate);
-    socket.on('alert:new', onAlertNew);
-    socket.on('trip:started', onTripUpdate);
-    socket.on('trip:updated', onTripUpdate);
-    socket.on('trip:completed', onTripUpdate);
-    socket.on('device:status', onDeviceStatus);
+    const refresh = setInterval(loadAll, 20000);
+
+    const clockTick = setInterval(
+      () => setClock(Date.now()),
+      10000
+    );
 
     return () => {
-      socket.off('vehicle:update', onVehicleUpdate);
-      socket.off('telemetry:update', onTelemetryUpdate);
-      socket.off('alert:new', onAlertNew);
-      socket.off('trip:started', onTripUpdate);
-      socket.off('trip:updated', onTripUpdate);
-      socket.off('trip:completed', onTripUpdate);
-      socket.off('device:status', onDeviceStatus);
+      clearInterval(refresh);
+      clearInterval(clockTick);
+    };
+  }, [loadAll]);
+
+  // Real-time telemetry and alert updates.
+  useEffect(() => {
+    const socket = getSocket();
+
+    if (!socket) {
+      return undefined;
+    }
+
+    const onVehicleUpdate = (vehicle) => {
+      setVehicles(prev =>
+        prev.map(v =>
+          String(v.id) === String(vehicle.id)
+            ? { ...v, ...vehicle }
+            : v
+        )
+      );
+    };
+
+    const onTelemetryUpdate = ({
+      vehicle_id,
+      reading
+    }) => {
+      setVehicles(prev =>
+        prev.map(v =>
+          String(v.id) === String(vehicle_id)
+            ? {
+                ...v,
+                latest_telemetry: reading
+              }
+            : v
+        )
+      );
+    };
+
+    const onAlertNew = (alert) => {
+      if (
+        vehicleFilterId &&
+        String(alert.vehicle_id) !== vehicleFilterId
+      ) {
+        return;
+      }
+
+      setRecentAlerts(prev =>
+        prev.some(a => a.id === alert.id)
+          ? prev
+          : [alert, ...prev].slice(0, 30)
+      );
+
+      setSummary(prev =>
+        prev
+          ? {
+              ...prev,
+              open_alerts:
+                asNumber(prev.open_alerts) + 1
+            }
+          : prev
+      );
+    };
+
+    const onTripUpdate = (trip) => {
+      setVehicles(prev =>
+        prev.map(v =>
+          String(v.id) === String(trip.vehicle_id)
+            ? {
+                ...v,
+                active_trip:
+                  ['COMPLETED', 'CANCELLED'].includes(trip.status)
+                    ? null
+                    : trip
+              }
+            : v
+        )
+      );
+    };
+
+    const onDeviceStatus = ({
+      vehicle_id,
+      status
+    }) => {
+      setVehicles(prev =>
+        prev.map(v =>
+          String(v.id) === String(vehicle_id)
+            ? {
+                ...v,
+                current_status: status
+              }
+            : v
+        )
+      );
+    };
+
+    const events = [
+      ['vehicle:update', onVehicleUpdate],
+      ['telemetry:update', onTelemetryUpdate],
+      ['alert:new', onAlertNew],
+      ['trip:started', onTripUpdate],
+      ['trip:updated', onTripUpdate],
+      ['trip:completed', onTripUpdate],
+      ['device:status', onDeviceStatus]
+    ];
+
+    for (const [name, handler] of events) {
+      socket.on(name, handler);
+    }
+
+    return () => {
+      for (const [name, handler] of events) {
+        socket.off(name, handler);
+      }
     };
   }, [getSocket, vehicleFilterId]);
 
-  const visibleVehicles = vehicleFilterId
-    ? vehicles.filter((vehicle) => String(vehicle.id) === String(vehicleFilterId))
-    : vehicles;
+  // Selected vehicle controls every dashboard section.
+  const visibleVehicles = useMemo(() => {
+    if (!vehicleFilterId) {
+      return vehicles;
+    }
+
+    return vehicles.filter(
+      v => String(v.id) === vehicleFilterId
+    );
+  }, [vehicles, vehicleFilterId]);
+
+  // Calculate KPIs directly from the most recent telemetry.
+  const live = useMemo(() => {
+    const reporting = visibleVehicles.filter(isReporting);
+
+    const readings = reporting
+      .filter(v => v.latest_telemetry)
+      .map(v => v.latest_telemetry);
+
+    const currentFuel = readings.reduce(
+      (sum, reading) =>
+        sum + asNumber(reading.fuel_level_litres),
+      0
+    );
+
+    const moving = reporting.filter(
+      v =>
+        v.latest_telemetry &&
+        asNumber(v.latest_telemetry.speed) > 2
+    );
+
+    const avgSpeed = moving.length
+      ? moving.reduce(
+          (sum, v) =>
+            sum + asNumber(v.latest_telemetry.speed),
+          0
+        ) / moving.length
+      : 0;
+
+    const activeTrips = visibleVehicles.filter(
+      v => v.active_trip?.status === 'ACTIVE'
+    ).length;
+
+    const fuelCapacity = visibleVehicles.reduce(
+      (sum, v) =>
+        sum + asNumber(v.fuel_tank_capacity),
+      0
+    );
+
+    return {
+      total: visibleVehicles.length,
+      reporting: reporting.length,
+      activeTrips,
+      fuelLitres: currentFuel,
+      fuelCapacity,
+      hasReading: readings.length > 0,
+      avgSpeed,
+      movingCount: moving.length
+    };
+  }, [visibleVehicles, clock]);
+
+  const selectedVehicle = vehicleFilterId
+    ? visibleVehicles[0]
+    : null;
+
+  const newestTheftAlert = recentAlerts.find(
+    a =>
+      a.type === 'THEFT_SUSPECTED' &&
+      String(a.severity).toUpperCase() === 'CRITICAL'
+  );
+
+  function selectVehicle(id) {
+    setVehicleFilterId(
+      id == null || id === ''
+        ? ''
+        : String(id)
+    );
+  }
 
   async function handleAcknowledge(id) {
-    await alertApi.acknowledge(id);
-    setRecentAlerts((prev) => prev.filter((a) => a.id !== id));
+    try {
+      await alertApi.acknowledge(id);
+
+      setRecentAlerts(
+        prev => prev.filter(a => a.id !== id)
+      );
+
+      setSummary(prev =>
+        prev
+          ? {
+              ...prev,
+              open_alerts: Math.max(
+                0,
+                asNumber(prev.open_alerts) - 1
+              )
+            }
+          : prev
+      );
+    } catch {
+      setError(
+        'Could not acknowledge the alert. Please try again.'
+      );
+    }
   }
 
   if (loading) {
@@ -100,79 +344,338 @@ export default function Dashboard() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 18
+    }}>
       <div className="fm-page-head">
         <div>
           <h1>Fleet Dashboard</h1>
-          <p style={{ color: 'var(--fm-muted)' }}>Live overview of your vehicles, fuel and trip activity.</p>
+
+          <p style={{ color: 'var(--fm-muted)' }}>
+            Live data from authenticated device telemetry
+            {' · '}
+            {selectedVehicle
+              ? selectedVehicle.license_plate
+              : 'All vehicles'}
+          </p>
         </div>
+
         <label className="fm-field-inline">
           <span>Vehicle view</span>
+
           <select
             value={vehicleFilterId}
-            onChange={(event) => {
-              const value = event.target.value;
-              setVehicleFilterId(value);
-              setSelectedVehicleId(value ? Number(value) : null);
-            }}
+            onChange={e => selectVehicle(e.target.value)}
           >
             <option value="">All vehicles</option>
-            {vehicles.map((vehicle) => (
-              <option key={vehicle.id} value={vehicle.id}>
-                {vehicle.name} · {vehicle.license_plate}
+
+            {vehicles.map(v => (
+              <option key={v.id} value={v.id}>
+                {v.name} · {v.license_plate}
               </option>
             ))}
           </select>
         </label>
       </div>
 
+      {error && (
+        <div
+          role="alert"
+          className="fm-card fm-card-pad"
+          style={{ border: '1px solid #F59E0B' }}
+        >
+          {error}
+
+          <button
+            type="button"
+            className="fm-btn fm-btn-ghost fm-btn-sm"
+            onClick={loadAll}
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
+      {/* Critical theft notification */}
+      {newestTheftAlert && (
+        <div
+          role="alert"
+          className="fm-card fm-card-pad"
+          style={{
+            border: '2px solid #EF4444',
+            background: 'rgba(239,68,68,.10)',
+            display: 'flex',
+            gap: 12,
+            alignItems: 'center'
+          }}
+        >
+          <AlertTriangle
+            color="#EF4444"
+            size={30}
+          />
+
+          <div style={{ flex: 1 }}>
+            <strong style={{ color: '#EF4444' }}>
+              CRITICAL — POSSIBLE FUEL THEFT
+            </strong>
+
+            <div>
+              {newestTheftAlert.vehicle_name}
+              {' ('}
+              {newestTheftAlert.license_plate}
+              {'): '}
+              {newestTheftAlert.message}
+            </div>
+
+            <div style={{
+              fontSize: 12,
+              color: 'var(--fm-muted)'
+            }}>
+              Rule-based stationary fuel loss · Investigate immediately
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="fm-btn fm-btn-secondary fm-btn-sm"
+            onClick={() => navigate('/alerts')}
+          >
+            Review alert
+          </button>
+        </div>
+      )}
+
+      {/* Live KPI cards */}
       <div className="kpi-grid">
-        <KPICard icon={Truck} label="Active vehicles" value={`${summary.active_vehicles}/${summary.total_vehicles}`} sub={vehicleFilterId ? 'Selected vehicle' : 'Reporting now'} />
-        <KPICard icon={RouteIcon} label="Active trips" value={summary.active_trips} sub="In progress" onClick={() => navigate('/logbook?status=ACTIVE')} />
-        <KPICard icon={Fuel} label="Fuel monitored" value={`${summary.total_fuel_litres.toLocaleString()} L`} sub="Tracked across trips" />
-        <KPICard icon={Gauge} label="Avg. consumption" value={summary.average_consumption_km_per_l ? `${summary.average_consumption_km_per_l} km/L` : '—'} sub={vehicleFilterId ? 'Selected vehicle' : 'Fleet average'} />
-        <KPICard icon={Bell} label="Open alerts" value={summary.open_alerts} tone="red" sub="Needs attention" onClick={() => navigate('/alerts')} />
+        <KPICard
+          icon={Truck}
+          label="Reporting vehicles"
+          value={`${live.reporting}/${live.total}`}
+          sub={
+            vehicleFilterId
+              ? 'Selected vehicle · live status'
+              : 'Currently reporting'
+          }
+        />
+
+        <KPICard
+          icon={RouteIcon}
+          label="Active trips"
+          value={live.activeTrips}
+          sub="From current Logbook trip status"
+          onClick={() => navigate('/logbook?status=ACTIVE')}
+        />
+
+        <KPICard
+          icon={Fuel}
+          label="Current tank fuel"
+          value={
+            live.hasReading
+              ? `${live.fuelLitres.toLocaleString(
+                  undefined,
+                  { maximumFractionDigits: 1 }
+                )} L`
+              : '—'
+          }
+          sub={
+            live.fuelCapacity
+              ? `Configured tank capacity: ${live.fuelCapacity.toLocaleString()} L · latest reading`
+              : 'Awaiting live telemetry'
+          }
+        />
+
+        <KPICard
+          icon={Gauge}
+          label="Live speed"
+          value={`${live.avgSpeed.toFixed(1)} km/h`}
+          sub={
+            vehicleFilterId
+              ? 'Current selected vehicle speed'
+              : `Average moving speed · ${live.movingCount} moving`
+          }
+        />
+
+        <KPICard
+          icon={Bell}
+          label="Open alerts"
+          value={
+            summary
+              ? asNumber(summary.open_alerts)
+              : '…'
+          }
+          tone="red"
+          sub="Unacknowledged active incidents"
+          onClick={() => navigate('/alerts')}
+        />
       </div>
 
+      {/* Map and vehicle list */}
       <div className="dashboard-grid">
-        <div className="fm-card" style={{ height: 460, display: 'flex', flexDirection: 'column' }}>
-          <div style={{ padding: '14px 16px 0' }}>
-            <h3 style={{ margin: 0 }}>Live Fleet Map</h3>
+        <div
+          className="fm-card"
+          style={{
+            height: 460,
+            display: 'flex',
+            flexDirection: 'column'
+          }}
+        >
+          <div style={{
+            padding: '14px 16px 0',
+            display: 'flex',
+            justifyContent: 'space-between'
+          }}>
+            <h3 style={{ margin: 0 }}>
+              Live Fleet Map
+            </h3>
+
+            {vehicleFilterId && (
+              <button
+                type="button"
+                className="fm-btn fm-btn-ghost fm-btn-sm"
+                onClick={() => selectVehicle('')}
+              >
+                Show all
+              </button>
+            )}
           </div>
-          <div style={{ flex: 1, padding: 12 }}>
-            <LiveMap vehicles={visibleVehicles} selectedVehicleId={selectedVehicleId} onSelectVehicle={setSelectedVehicleId} />
+
+          <div style={{
+            flex: 1,
+            padding: 12
+          }}>
+            <LiveMap
+              vehicles={visibleVehicles}
+              selectedVehicleId={
+                vehicleFilterId
+                  ? Number(vehicleFilterId)
+                  : null
+              }
+              onSelectVehicle={selectVehicle}
+            />
           </div>
         </div>
 
-        <div className="fm-card fm-card-pad" style={{ height: 460, display: 'flex', flexDirection: 'column' }}>
-          <h3>Vehicles</h3>
+        <div
+          className="fm-card fm-card-pad"
+          style={{
+            height: 460,
+            display: 'flex',
+            flexDirection: 'column'
+          }}
+        >
+          <h3>
+            Vehicles
+            {vehicleFilterId ? ' · Filtered' : ''}
+          </h3>
+
           {visibleVehicles.length === 0 ? (
-            <EmptyState title="No vehicles yet" description="Add your first truck to start tracking it." action={
-              <button type="button" className="fm-btn fm-btn-primary" onClick={() => navigate('/vehicles')}>Add a vehicle</button>
-            }
+            <EmptyState
+              title="No vehicles"
+              description="Choose a vehicle or add a truck."
             />
           ) : (
-            <div style={{ overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {visibleVehicles.map((v) => (
+            <div style={{
+              overflowY: 'auto',
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 8
+            }}>
+              {visibleVehicles.map(v => (
                 <div
                   key={v.id}
-                  onClick={() => { setSelectedVehicleId(v.id); navigate(`/vehicles/${v.id}`); }}
                   style={{
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    padding: '10px 12px', borderRadius: 8, cursor: 'pointer',
-                    background: selectedVehicleId === v.id ? 'var(--fm-navy-tint)' : 'transparent',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    gap: 12,
+                    alignItems: 'center',
+                    padding: '10px 12px',
+                    borderRadius: 8,
+                    background:
+                      vehicleFilterId === String(v.id)
+                        ? 'var(--fm-navy-tint)'
+                        : 'transparent'
                   }}
                 >
                   <div>
-                    <div style={{ fontWeight: 600 }}>{v.name}</div>
-                    <div style={{ fontSize: 12, color: 'var(--fm-muted)' }}>{v.license_plate} · {v.driver_name || 'Unassigned'}</div>
-                    {v.active_trip && <div style={{ fontSize: 11, color: 'var(--fm-muted)', marginTop: 3 }}>{v.active_trip.status === 'PENDING_DETAILS' ? 'Trip ready · ' : 'Trip · '}{v.active_trip.route_name || `${v.active_trip.origin || 'Origin'} → ${v.active_trip.destination || 'Destination'}`}</div>}
+                    <button
+                      type="button"
+                      onClick={() => selectVehicle(v.id)}
+                      style={{
+                        display: 'block',
+                        border: 0,
+                        padding: 0,
+                        background: 'transparent',
+                        color: 'inherit',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                        textAlign: 'left'
+                      }}
+                    >
+                      {v.name}
+                    </button>
+
+                    <div style={{
+                      fontSize: 12,
+                      color: 'var(--fm-muted)'
+                    }}>
+                      {v.license_plate}
+                      {' · '}
+                      {v.driver_name || 'Unassigned'}
+                    </div>
+
+                    {v.active_trip && (
+                      <div style={{
+                        fontSize: 11,
+                        marginTop: 4,
+                        color: 'var(--fm-muted)'
+                      }}>
+                        Trip: {v.active_trip.status}
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      className="fm-btn fm-btn-ghost fm-btn-sm"
+                      onClick={() =>
+                        navigate(`/vehicles/${v.id}`)
+                      }
+                    >
+                      Details
+                    </button>
                   </div>
-                  <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 6 }}>
-                    <VehicleStatusBadge status={v.current_status} />
-                    <IgnitionSwitch vehicle={v} compact />
+
+                  <div style={{
+                    textAlign: 'right',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'flex-end',
+                    gap: 6
+                  }}>
+                    <VehicleStatusBadge
+                      status={v.current_status}
+                    />
+
+                    <IgnitionSwitch
+                      vehicle={v}
+                      compact
+                    />
+
                     {v.latest_telemetry && (
-                      <div style={{ fontSize: 12, color: 'var(--fm-muted)' }}>{Number(v.latest_telemetry.fuel_percent).toFixed(0)}% fuel · GPS {v.current_status === 'OFFLINE' ? 'last known' : 'live'}</div>
+                      <div style={{
+                        fontSize: 12,
+                        color: 'var(--fm-muted)'
+                      }}>
+                        {asNumber(
+                          v.latest_telemetry.fuel_percent
+                        ).toFixed(1)}% fuel
+                        {' · '}
+                        {asNumber(
+                          v.latest_telemetry.speed
+                        ).toFixed(1)} km/h
+                      </div>
                     )}
                   </div>
                 </div>
@@ -182,17 +685,51 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Vehicle-filtered alerts */}
       <div className="fm-card fm-card-pad">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-          <h3 style={{ margin: 0 }}>Recent Active Alerts</h3>
-          <button type="button" className="fm-btn fm-btn-ghost fm-btn-sm" onClick={() => navigate('/alerts')}>View all</button>
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          marginBottom: 10
+        }}>
+          <h3 style={{ margin: 0 }}>
+            Recent Active Alerts
+            {selectedVehicle
+              ? ` · ${selectedVehicle.license_plate}`
+              : ''}
+          </h3>
+
+          <button
+            type="button"
+            className="fm-btn fm-btn-ghost fm-btn-sm"
+            onClick={() => navigate('/alerts')}
+          >
+            View all
+          </button>
         </div>
+
         {recentAlerts.length === 0 ? (
-          <EmptyState icon={Bell} title="No active alerts" description="Your fleet is currently clear." />
+          <EmptyState
+            icon={Bell}
+            title="No active alerts"
+            description="There are no unacknowledged active incidents for this selection."
+          />
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            {recentAlerts.map((a) => (
-              <AlertCard key={a.id} alert={a} onAcknowledge={handleAcknowledge} onOpenVehicle={(id) => navigate(`/vehicles/${id}`)} />
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 10
+          }}>
+            {recentAlerts.slice(0, 10).map(a => (
+              <AlertCard
+                key={a.id}
+                alert={a}
+                onAcknowledge={handleAcknowledge}
+                onOpenVehicle={id =>
+                  navigate(`/vehicles/${id}`)
+                }
+              />
             ))}
           </div>
         )}
