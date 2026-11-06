@@ -1,1134 +1,347 @@
-const fs = require('fs');
-const path = require('path');
-const { io } = require('socket.io-client');
 
-const {
-  totalDistanceKm,
-  positionAtDistance,
-  offsetPerpendicular,
-} = require('./routes');
+'use strict';
 
-const scenarios =
-  require('./scenarios');
+// FREIGHT MALAWI — SIMULATION SCENARIOS
+// Every truck refuels to 100% of its configured tank capacity.
+// Truck 2 also demonstrates a stationary fuel-theft event.
 
-const configPath =
-  path.join(
-    __dirname,
-    'config.json',
-  );
+const SCENARIOS = [
+  'NORMAL',
+  'FUEL_THEFT',
+  'REFUEL',
+  'OVERSPEEDING',
+  'OVERWEIGHT',
+  'AGGRESSIVE_DRIVER',
+  'EXCESSIVE_IDLE',
+  'ROUTE_DEVIATION',
+  'LOW_FUEL',
+  'DEVICE_DISCONNECT',
+  'ROUTE_COMPLETION',
+];
 
-const config =
-  JSON.parse(
-    fs.readFileSync(
-      configPath,
-      'utf8',
-    ),
-  );
+// Demonstration-friendly event positions.
+const REFUEL_AT = 0.08;
+const THEFT_AT = 0.18;
 
-const BACKEND_URL =
-  (
-    process.env.BACKEND_URL ||
-    process.env.SIMULATOR_BACKEND_URL ||
-    config.backendUrl ||
-    'http://localhost:5000'
-  ).replace(
-    /\/$/,
-    '',
-  );
+// Fuel theft removes 35 litres while stationary.
+const THEFT_LITRES = 35;
 
-const INTERVAL_MS =
-  Number(
-    process.env.TELEMETRY_INTERVAL_MS ||
-      config.telemetryIntervalMs ||
-      2000,
-  );
+// Number of stationary readings before the event.
+const BASELINE_TICKS = 4;
 
-const TIME_SCALE =
-  Number(
-    process.env.SIMULATION_TIME_SCALE ||
-      config.simulationTimeScale ||
-      30,
-  );
+// Total stationary readings before driving resumes.
+const STOP_TICKS = 8;
 
-// ---------------------------------------------------------------------------
-// Device keys are generated automatically - nobody types them.
-// With DEVICE_KEY_SECRET set (production), each device's key is derived from
-// its device ID. backend/scripts/provisionSimulatorDevices.js derives the SAME
-// key and stores only its bcrypt hash in the database. Without the secret the
-// legacy deviceKey from config.json is used (local demo only).
-// deriveDeviceKey() must stay identical to the one in the provisioning script.
-// ---------------------------------------------------------------------------
-const crypto =
-  require('crypto');
+const rand = (min, max) =>
+  min + Math.random() * (max - min);
 
-const DEVICE_KEY_SECRET =
-  String(
-    process.env.DEVICE_KEY_SECRET ||
-      '',
-  ).trim();
+const clamp = (value, min, max) =>
+  Math.max(min, Math.min(max, value));
 
-function deriveDeviceKey(
-  secret,
-  deviceId,
-) {
-  return crypto
-    .createHmac(
-      'sha256',
-      String(secret),
-    )
-    .update(
-      `freight-malawi/device-key/v1/${deviceId}`,
-    )
-    .digest(
-      'base64url',
-    );
-}
-
-function resolveDeviceKey(
-  vehicleCfg,
-) {
-  if (
-    DEVICE_KEY_SECRET
-  ) {
-    return deriveDeviceKey(
-      DEVICE_KEY_SECRET,
-      vehicleCfg.deviceId,
-    );
+function smoothToward(current, target, maximumChange) {
+  if (!Number.isFinite(current)) {
+    return target;
   }
 
-  return vehicleCfg.deviceKey
-    ? String(
-        vehicleCfg.deviceKey,
-      )
-    : '';
+  const difference = target - current;
+
+  if (Math.abs(difference) <= maximumChange) {
+    return target;
+  }
+
+  return current +
+    Math.sign(difference) * maximumChange;
 }
 
-const FALLBACK_ROUTE =
-  'BLANTYRE_LILONGWE';
+function baselineTarget(progress, tick) {
+  if (progress < 0.04 || progress > 0.96) {
+    return 42;
+  }
 
-const IDLE_CONSUMPTION_L_PER_HOUR =
-  1.4;
-
-function clamp(
-  value,
-  min,
-  max,
-) {
-  return Math.max(
-    min,
-    Math.min(
-      max,
-      value,
-    ),
-  );
+  return [68, 73, 76, 70, 74][
+    Math.floor(tick / 18) % 5
+  ];
 }
 
-function fuelConsumptionLPer100Km({
-  speedKmh,
-  cargoWeightKg,
-  payloadCapacityKg,
+// Schedule one refuel for every truck.
+// Schedule a separate theft stop for FUEL_THEFT.
+function beginScheduledStop(scenario, progress, state) {
+  if (state.fuelStop) return;
+
+  if (
+    !state.refuelApplied &&
+    progress >= REFUEL_AT &&
+    progress < 0.95
+  ) {
+    state.fuelStop = {
+      kind: 'REFUEL',
+      parkedTicks: 0,
+      eventSent: false
+    };
+
+    return;
+  }
+
+  if (
+    scenario === 'FUEL_THEFT' &&
+    state.refuelApplied &&
+    !state.theftApplied &&
+    progress >= THEFT_AT &&
+    progress < 0.95
+  ) {
+    state.fuelStop = {
+      kind: 'THEFT',
+      parkedTicks: 0,
+      eventSent: false
+    };
+  }
+}
+
+// Calculate simulated driving speed.
+// Fuel stops override movement until the event is complete.
+function speedForScenario(
   scenario,
-  progressFraction,
-}) {
-  const cargoTonnes =
-    Math.max(
-      0,
-      Number(
-        cargoWeightKg || 0,
-      ),
-    ) / 1000;
-
-  const capacityTonnes =
-    Math.max(
-      1,
-      Number(
-        payloadCapacityKg ||
-          12000,
-      ),
-    ) / 1000;
-
-  const loadRatio =
-    clamp(
-      cargoTonnes /
-        capacityTonnes,
-      0,
-      1.25,
-    );
-
-  let consumption =
-    30 +
-    cargoTonnes *
-      0.45;
-
-  if (
-    loadRatio > 1
-  ) {
-    consumption +=
-      (
-        loadRatio - 1
-      ) *
-      8;
-  }
-
-  if (
-    speedKmh > 75
-  ) {
-    consumption +=
-      Math.min(
-        5,
-        (
-          speedKmh - 75
-        ) *
-          0.08,
-      );
-  }
-
-  if (
-    speedKmh > 0 &&
-    speedKmh < 45
-  ) {
-    consumption += 1.5;
-  }
-
-  if (
-    progressFraction >= 0.55 &&
-    progressFraction <= 0.78
-  ) {
-    consumption *= 1.05;
-  }
-
-  if (
-    scenario ===
-    'AGGRESSIVE_DRIVER'
-  ) {
-    consumption += 1.5;
-  }
-
-  if (
-    scenario ===
-    'OVERSPEEDING'
-  ) {
-    consumption += 1;
-  }
-
-  return clamp(
-    consumption,
-    28,
-    43,
-  );
-}
-
-class VehicleSimulator {
-  constructor(cfg) {
-    this.cfg = cfg;
-
-    this.routeKey =
-      null;
-
-    this.progressKm =
-      0;
-
-    this.odometerKm =
-      12000 +
-      Math.round(
-        Math.random() *
-          5000,
-      );
-
-    this.engineHours =
-      0;
-
-    this.tankCapacity =
-      Number(
-        cfg.tankCapacity ||
-          400,
-      );
-
-    this.fuelLitres =
-      (
-        scenarios.initialFuelPercent(
-          cfg.scenario,
-        ) / 100
-      ) *
-      this.tankCapacity;
-
-    this.ignitionOn =
-      false;
-
-    this.pendingInitialTelemetry =
-      false;
-
-    this.tickIndex =
-      0;
-
-    this.state = {};
-
-    this.cargoWeightKg =
-      scenarios.cargoWeightForScenario(
-        cfg.scenario,
-        cfg.payloadCapacity ||
-          12000,
-        cfg.cargoWeightKg,
-      );
-
-    this.lastKnownPosition =
-      null;
-
-    this.bootstrapped =
-      false;
-
-    this.socket =
-      null;
-
-    this.interval =
-      null;
-
-    this.log = (
-      ...args
-    ) =>
-      console.log(
-        `[${cfg.licensePlate}]`,
-        ...args,
-      );
-  }
-
-  connect() {
-    this.log(
-      `connecting to ${BACKEND_URL}`,
-    );
-
-    this.socket =
-      io(
-        `${BACKEND_URL}/device`,
-        {
-          auth: {
-            deviceId:
-              this.cfg
-                .deviceId,
-
-            deviceKey:
-              this.cfg
-                .deviceKey,
-          },
-
-          transports: [
-            'websocket',
-            'polling',
-          ],
-
-          reconnection:
-            true,
-
-          reconnectionDelay:
-            2000,
-
-          reconnectionDelayMax:
-            10000,
-
-          timeout:
-            10000,
-        },
-      );
-
-    this.socket.on(
-      'connect',
-      () => {
-        this.log(
-          `CONNECTED to ${BACKEND_URL}`,
-        );
-
-        this.log(
-          'waiting for Dashboard ignition command',
-        );
-      },
-    );
-
-    this.socket.on(
-      'device:state',
-      ({
-        reading,
-        trip,
-      }) => {
-        if (reading) {
-          this.lastKnownPosition =
-            {
-              lat: Number(
-                reading.latitude,
-              ),
-
-              lng: Number(
-                reading.longitude,
-              ),
-
-              heading:
-                Number(
-                  reading.heading ||
-                    0,
-                ),
-            };
-
-          if (
-            Number.isFinite(
-              Number(
-                reading
-                  .odometer_km,
-              ),
-            )
-          ) {
-            this.odometerKm =
-              Number(
-                reading
-                  .odometer_km,
-              );
-          }
-
-          if (
-            Number.isFinite(
-              Number(
-                reading
-                  .engine_hours,
-              ),
-            )
-          ) {
-            this.engineHours =
-              Number(
-                reading
-                  .engine_hours,
-              );
-          }
-
-          if (
-            Number.isFinite(
-              Number(
-                reading
-                  .fuel_level_litres,
-              ),
-            )
-          ) {
-            this.fuelLitres =
-              Number(
-                reading
-                  .fuel_level_litres,
-              );
-          }
-        }
-
-        if (
-          trip?.route_key
-        ) {
-          this.routeKey =
-            trip.route_key;
-        }
-
-        if (
-          trip?.cargo_weight_kg !=
-          null
-        ) {
-          this.cargoWeightKg =
-            Number(
-              trip.cargo_weight_kg,
-            );
-        }
-
-        this.bootstrapped =
-          true;
-
-        this.tick();
-      },
-    );
-
-    this.socket.on(
-      'control:ignition',
-      (command = {}) => {
-        const nextIgnition =
-          Boolean(
-            command.ignition_on,
-          );
-
-        if (
-          command.route_key
-        ) {
-          this.routeKey =
-            command.route_key;
-        }
-
-        if (
-          command.cargo_weight_kg !=
-          null
-        ) {
-          this.cargoWeightKg =
-            scenarios.cargoWeightForScenario(
-              this.cfg.scenario,
-              this.cfg
-                .payloadCapacity ||
-                12000,
-              Number(
-                command.cargo_weight_kg,
-              ),
-            );
-        }
-
-        if (
-          nextIgnition &&
-          command.new_trip
-        ) {
-          this.progressKm =
-            0;
-
-          this.state = {};
-
-          this.tickIndex =
-            0;
-
-          this.pendingInitialTelemetry =
-            true;
-
-          this.lastKnownPosition =
-            null;
-
-          if (
-            this.routeKey
-          ) {
-            const origin =
-              positionAtDistance(
-                this.routeKey,
-                0,
-              );
-
-            this.lastKnownPosition =
-              {
-                lat:
-                  origin.lat,
-
-                lng:
-                  origin.lng,
-
-                heading:
-                  origin.heading,
-              };
-          }
-
-          this.log(
-            `NEW TRIP command received: ${this.routeKey || 'NO ROUTE'}`,
-          );
-
-          this.log(
-            `Cargo weight: ${this.cargoWeightKg} kg`,
-          );
-        }
-
-        this.ignitionOn =
-          nextIgnition;
-
-        this.log(
-          this.ignitionOn
-            ? 'IGNITION ON'
-            : 'IGNITION OFF',
-        );
-
-        this.tick();
-      },
-    );
-
-    this.socket.on(
-      'connect_error',
-      (error) => {
-        this.log(
-          `connection error: ${error.message}`,
-        );
-
-        if (
-          String(
-            error.message,
-          ).includes(
-            'DEVICE_UNAUTHORIZED',
-          )
-        ) {
-          this.log(
-            'DEVICE UNAUTHORIZED: the backend database has no matching key hash. Run backend provisioning with --apply against the SAME Supabase database as Render, and make sure DEVICE_KEY_SECRET here equals the one in backend/.env.',
-          );
-        }
-
-        if (
-          error.message ===
-          'ECONNREFUSED'
-        ) {
-          this.log(
-            `Cannot reach ${BACKEND_URL}`,
-          );
-        }
-      },
-    );
-
-    this.socket.on(
-      'disconnect',
-      (reason) => {
-        this.log(
-          `DISCONNECTED: ${reason}`,
-        );
-      },
-    );
-  }
-
-  currentPosition() {
-    if (
-      this.routeKey
-    ) {
-      let position =
-        positionAtDistance(
-          this.routeKey,
-          this.progressKm,
-        );
-
-      const totalKm =
-        totalDistanceKm(
-          this.routeKey,
-        );
-
-      const fraction =
-        totalKm > 0
-          ? clamp(
-              this.progressKm /
-                totalKm,
-              0,
-              1,
-            )
-          : 0;
-
-      if (
-        scenarios.isDeviating(
-          this.cfg.scenario,
-          fraction,
-        )
-      ) {
-        position = {
-          ...position,
-          ...offsetPerpendicular(
-            position.lat,
-            position.lng,
-            position.heading,
-            8,
-          ),
-        };
-      }
-
-      return position;
-    }
-
-    if (
-      this.lastKnownPosition
-    ) {
-      return this.lastKnownPosition;
-    }
-
-    const fallback =
-      positionAtDistance(
-        FALLBACK_ROUTE,
-        0,
-      );
-
-    return {
-      lat:
-        fallback.lat,
-
-      lng:
-        fallback.lng,
-
-      heading:
-        fallback.heading,
-    };
-  }
-
-  tick() {
-    this.tickIndex += 1;
-
-    if (
-      !this.socket?.connected ||
-      !this.bootstrapped
-    ) {
-      return;
-    }
-
-    const scenario =
-      this.cfg.scenario ||
-      'NORMAL';
-
-    const virtualDtHours =
-      (
-        INTERVAL_MS /
-        1000
-      ) *
-      TIME_SCALE /
-      3600;
-
-    const totalKm =
-      this.routeKey
-        ? totalDistanceKm(
-            this.routeKey,
-          )
-        : 0;
-
-    let speed = 0;
-
-    let distanceThisTick =
-      0;
-
-    const publishOriginOnly =
-      this
-        .pendingInitialTelemetry;
-
-    this.pendingInitialTelemetry =
-      false;
-
-    if (
-      !publishOriginOnly &&
-      this.ignitionOn &&
-      this.routeKey &&
-      totalKm > 0
-    ) {
-      const beforeKm =
-        this.progressKm;
-
-      const fraction =
-        clamp(
-          beforeKm /
-            totalKm,
-          0,
-          1,
-        );
-
-      speed =
-        scenarios.speedForScenario(
-          scenario,
-          fraction,
-          this.tickIndex,
-          this.cfg
-            .overspeedThresholdKmh ||
-            80,
-          this.state,
-        );
-
-      const requestedDistanceKm =
-        speed *
-        virtualDtHours;
-
-      const afterKm =
-        Math.min(
-          totalKm,
-          beforeKm +
-            requestedDistanceKm,
-        );
-
-      distanceThisTick =
-        Math.max(
-          0,
-          afterKm -
-            beforeKm,
-        );
-
-      this.progressKm =
-        afterKm;
-
-      this.odometerKm +=
-        distanceThisTick;
-
-      this.engineHours +=
-        virtualDtHours;
-    }
-
-    const progressFraction =
-      totalKm > 0
-        ? clamp(
-            this.progressKm /
-              totalKm,
-            0,
-            1,
-          )
-        : 0;
-
-    let position =
-      this.currentPosition();
-
-    const consumption =
-      fuelConsumptionLPer100Km(
-        {
-          speedKmh: speed,
-
-          cargoWeightKg:
-            this.cargoWeightKg,
-
-          payloadCapacityKg:
-            this.cfg
-              .payloadCapacity ||
-            12000,
-
-          scenario,
-
-          progressFraction,
-        },
-      );
-
-    let fuelDelta =
-      -(
-        distanceThisTick *
-        consumption /
-        100
-      );
-
-    if (
-      this.ignitionOn &&
-      speed === 0
-    ) {
-      fuelDelta -=
-        IDLE_CONSUMPTION_L_PER_HOUR *
-        virtualDtHours;
-    }
-
-    fuelDelta +=
-      scenarios.fuelEventForScenario(
-        scenario,
-        progressFraction,
-        this.state,
-      );
-
-    this.fuelLitres =
-      clamp(
-        this.fuelLitres +
-          fuelDelta,
-        0,
-        this.tankCapacity,
-      );
-
-    if (
-      this.progressKm >=
-        totalKm &&
-      totalKm > 0
-    ) {
-      this.progressKm =
-        totalKm;
-
-      speed = 0;
-
-      this.ignitionOn =
-        false;
-
-      this.state
-        .currentSpeedKmh =
-        0;
-
-      position =
-        positionAtDistance(
-          this.routeKey,
-          totalKm,
-        );
-
-      this.log(
-        `DESTINATION REACHED: ${totalKm.toFixed(
-          1,
-        )} km`,
-      );
-    }
-
-    if (
-      position
-    ) {
-      this.lastKnownPosition =
-        {
-          lat:
-            position.lat,
-
-          lng:
-            position.lng,
-
-          heading:
-            position.heading ||
-            0,
-        };
-    }
-
-    const fuelPercent =
-      this.tankCapacity >
-      0
-        ? (
-            this.fuelLitres /
-            this.tankCapacity
-          ) *
-          100
-        : 0;
-
-    const payload = {
-      device_id:
-        this.cfg.deviceId,
-
-      device_key:
-        this.cfg.deviceKey,
-
-      telemetry_uuid:
-        `${this.cfg.deviceId}-${Date.now()}-${this.tickIndex}`,
-
-      latitude:
-        Number(
-          (
-            this
-              .lastKnownPosition
-              ?.lat || 0
-          ).toFixed(6),
-        ),
-
-      longitude:
-        Number(
-          (
-            this
-              .lastKnownPosition
-              ?.lng || 0
-          ).toFixed(6),
-        ),
-
-      speed:
-        Number(
-          Math.max(
-            0,
-            speed,
-          ).toFixed(1),
-        ),
-
-      heading:
-        Number(
-          (
-            this
-              .lastKnownPosition
-              ?.heading || 0
-          ).toFixed(1),
-        ),
-
-      fuel_level_litres:
-        Number(
-          this.fuelLitres.toFixed(
-            2,
-          ),
-        ),
-
-      fuel_percent:
-        Number(
-          clamp(
-            fuelPercent,
-            0,
-            100,
-          ).toFixed(1),
-        ),
-
-      odometer_km:
-        Number(
-          this.odometerKm.toFixed(
-            2,
-          ),
-        ),
-
-      engine_hours:
-        Number(
-          this.engineHours.toFixed(
-            2,
-          ),
-        ),
-
-      ignition_on:
-        this.ignitionOn,
-
-      cargo_weight_kg:
-        this.cargoWeightKg,
-
-      gps_valid: true,
-
-      recorded_at:
-        new Date().toISOString(),
-    };
-
-    this.socket.emit(
-      'telemetry',
-      payload,
-      (ack) => {
-        if (
-          !ack ||
-          !ack.success
-        ) {
-          this.log(
-            `telemetry rejected: ${
-              ack?.message ||
-              'unknown error'
-            }`,
-          );
-        }
-      },
-    );
-  }
-
-  start() {
-    this.connect();
-
-    this.interval =
-      setInterval(
-        () =>
-          this.tick(),
-        INTERVAL_MS,
-      );
-  }
-
-  stop() {
-    if (
-      this.interval
-    ) {
-      clearInterval(
-        this.interval,
-      );
-    }
-
-    if (
-      this.socket
-    ) {
-      this.socket.disconnect();
-    }
-  }
-}
-
-function main() {
-  console.log(
-    '============================================================',
-  );
-
-  console.log(
-    ' FREIGHT MALAWI SIMULATOR',
-  );
-
-  console.log(
-    ` Backend: ${BACKEND_URL}`,
-  );
-
-  console.log(
-    ` Interval: ${INTERVAL_MS}ms`,
-  );
-
-  console.log(
-    ` Simulation time scale: ${TIME_SCALE}x`,
-  );
-
-  console.log(
-    ' Ignition: controlled from Dashboard',
-  );
-
-  console.log(
-    ' GPS: continuous device telemetry',
-  );
-
-  console.log(
-    '============================================================',
-  );
-
-  if (
-    !Array.isArray(
-      config.vehicles,
-    ) ||
-    config.vehicles.length ===
-      0
-  ) {
-    console.error(
-      'No simulator vehicles configured.',
-    );
-
-    process.exit(1);
-  }
-
-  if (
-    DEVICE_KEY_SECRET &&
-    DEVICE_KEY_SECRET.length <
-      32
-  ) {
-    console.error(
-      'DEVICE_KEY_SECRET is set but shorter than 32 characters. Use the value from backend/.env.',
-    );
-
-    process.exit(1);
-  }
-
-  console.log(
-    DEVICE_KEY_SECRET
-      ? ' Device keys: derived automatically from DEVICE_KEY_SECRET'
-      : ' Device keys: config.json deviceKey (legacy demo keys; set DEVICE_KEY_SECRET for production)',
-  );
-
-  const simulators =
-    config.vehicles.map(
-      (vehicle) => {
-        const deviceKey =
-          resolveDeviceKey(
-            vehicle,
-          );
-
-        if (
-          !deviceKey
-        ) {
-          console.error(
-            `No device key for ${vehicle.deviceId}: set DEVICE_KEY_SECRET on this service.`,
-          );
-
-          process.exit(1);
-        }
-
-        return new VehicleSimulator(
-          {
-            ...vehicle,
-            deviceKey,
-          },
-        );
-      },
-    );
-
-  simulators.forEach(
-    (simulator) =>
-      simulator.start(),
-  );
-
-  process.on(
-    'SIGINT',
-    () => {
-      console.log(
-        '\nStopping simulator...',
-      );
-
-      simulators.forEach(
-        (simulator) =>
-          simulator.stop(),
-      );
-
-      process.exit(0);
-    },
-  );
-
-  process.on(
-    'SIGTERM',
-    () => {
-      simulators.forEach(
-        (simulator) =>
-          simulator.stop(),
-      );
-
-      process.exit(0);
-    },
-  );
-}
-
-if (
-  require.main ===
-  module
+  progress,
+  tick,
+  overspeedThreshold,
+  state = {}
 ) {
-  main();
+  beginScheduledStop(scenario, progress, state);
+
+  const current = Number.isFinite(state.currentSpeedKmh)
+    ? state.currentSpeedKmh
+    : 0;
+
+  let target = baselineTarget(progress, tick);
+  let maximumChange = 8;
+
+  switch (scenario) {
+    case 'OVERSPEEDING':
+      target = clamp(
+        Number(overspeedThreshold || 80) + 12,
+        88,
+        98
+      );
+      break;
+
+    case 'AGGRESSIVE_DRIVER':
+      target = [35, 105, 25, 100][
+        Math.floor(tick / 4) % 4
+      ];
+      maximumChange = 60;
+      break;
+
+    case 'ROUTE_COMPLETION':
+      target = 72;
+      maximumChange = 7;
+      break;
+
+    case 'EXCESSIVE_IDLE':
+      if (
+        !state.extraIdleDone &&
+        progress >= 0.30 &&
+        !state.fuelStop
+      ) {
+        state.extraIdleTicks =
+          (state.extraIdleTicks || 0) + 1;
+
+        target = 0;
+
+        if (
+          state.extraIdleTicks >= 25 &&
+          current <= 1
+        ) {
+          state.extraIdleDone = true;
+        }
+      }
+      break;
+
+    default:
+      break;
+  }
+
+  // Ensure vehicle is stationary for refuelling/theft.
+  if (state.fuelStop) {
+    target = 0;
+    maximumChange = 12;
+  }
+
+  const speed = clamp(
+    smoothToward(current, target, maximumChange),
+    0,
+    120
+  );
+
+  state.currentSpeedKmh = speed;
+
+  if (state.fuelStop) {
+    const stop = state.fuelStop;
+
+    stop.parkedTicks = speed <= 0.1
+      ? stop.parkedTicks + 1
+      : 0;
+
+    if (
+      stop.eventSent &&
+      stop.parkedTicks >= STOP_TICKS
+    ) {
+      state.fuelStop = null;
+    }
+  }
+
+  return speed;
+}
+
+/*
+ * FUEL EVENTS
+ *
+ * Refuelling:
+ *   Amount added = tank capacity - current fuel
+ *
+ * This ensures the tank reaches 100%, not a fixed
+ * increase of 60 litres.
+ *
+ * Fuel theft:
+ *   Remove 35 litres while stationary.
+ */
+function fuelEventForScenario(
+  scenario,
+  progress,
+  state = {},
+  currentFuelLitres,
+  tankCapacity
+) {
+  const stop = state.fuelStop;
+
+  if (
+    !stop ||
+    stop.eventSent ||
+    stop.parkedTicks < BASELINE_TICKS
+  ) {
+    return 0;
+  }
+
+  // =====================================
+  // REFUELLING — FILL TO 100%
+  // =====================================
+  if (stop.kind === 'REFUEL') {
+    const capacity = Number(tankCapacity);
+    const current = Number(currentFuelLitres);
+
+    if (
+      !Number.isFinite(capacity) ||
+      capacity <= 0 ||
+      !Number.isFinite(current)
+    ) {
+      console.error(
+        '[SIM EVENT] REFUEL skipped: invalid tank capacity or fuel reading'
+      );
+
+      return 0;
+    }
+
+    const remainingFuel = clamp(
+      current,
+      0,
+      capacity
+    );
+
+    const litresAdded = Math.max(
+      0,
+      capacity - remainingFuel
+    );
+
+    stop.eventSent = true;
+    state.refuelApplied = true;
+
+    console.log(
+      `[SIM EVENT] REFUEL +${litresAdded.toFixed(2)} L ` +
+      `-> FULL ${capacity} L (100%) ` +
+      `at ${(progress * 100).toFixed(1)}% route`
+    );
+
+    return litresAdded;
+  }
+
+  // =====================================
+  // FUEL THEFT — TRUCK 2
+  // =====================================
+  if (
+    stop.kind === 'THEFT' &&
+    scenario === 'FUEL_THEFT'
+  ) {
+    stop.eventSent = true;
+    state.theftApplied = true;
+
+    console.log(
+      `[SIM EVENT] THEFT -${THEFT_LITRES} L ` +
+      `while STOPPED at ` +
+      `${(progress * 100).toFixed(1)}% route`
+    );
+
+    return -THEFT_LITRES;
+  }
+
+  return 0;
+}
+
+// Cargo weight and load scenarios.
+function cargoWeightForScenario(
+  scenario,
+  payloadCapacityKg,
+  requestedWeightKg
+) {
+  const capacity = Math.max(
+    1,
+    Number(payloadCapacityKg || 12000)
+  );
+
+  if (scenario === 'OVERWEIGHT') {
+    return Math.round(capacity * 1.18);
+  }
+
+  const requested = Number(requestedWeightKg);
+
+  return Number.isFinite(requested) &&
+    requested > 0
+    ? Math.round(requested * 100) / 100
+    : Math.round(capacity * 0.75);
+}
+
+// Route deviation scenario.
+function isDeviating(scenario, progress) {
+  return (
+    scenario === 'ROUTE_DEVIATION' &&
+    progress > 0.45 &&
+    progress < 0.55
+  );
+}
+
+// Starting fuel level.
+function initialFuelPercent(scenario) {
+  if (scenario === 'LOW_FUEL') {
+    return rand(8, 13);
+  }
+
+  return 82;
+}
+
+// Device disconnect scenario.
+function shouldDisconnectNow(scenario, tick) {
+  return (
+    scenario === 'DEVICE_DISCONNECT' &&
+    tick > 0 &&
+    tick % 36 === 0
+  );
 }
 
 module.exports = {
-  deriveDeviceKey,
-  resolveDeviceKey,
-  VehicleSimulator,
-  fuelConsumptionLPer100Km,
-  BACKEND_URL,
-  INTERVAL_MS,
-  TIME_SCALE,
+  SCENARIOS,
+  rand,
+  speedForScenario,
+  fuelEventForScenario,
+  cargoWeightForScenario,
+  isDeviating,
+  initialFuelPercent,
+  shouldDisconnectNow
 };
