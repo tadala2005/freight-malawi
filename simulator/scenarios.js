@@ -1,39 +1,10 @@
-// ============================================================================
-// FREIGHT MALAWI DRIVER SCENARIOS
-//
-// NORMAL:
-//   Smooth, believable speed changes.
-//
-// OVERSPEEDING:
-//   Smoothly maintains a speed above the configured threshold.
-//
-// AGGRESSIVE_DRIVER:
-//   Deliberately creates large acceleration/braking events.
-//
-// FUEL_THEFT:
-//   Vehicle stops and fuel drops suddenly.
-//
-// REFUEL:
-//   Vehicle stops and fuel rises suddenly.
-//
-// OVERWEIGHT:
-//   Cargo exceeds the configured vehicle payload capacity.
-//
-// EXCESSIVE_IDLE:
-//   Vehicle remains stationary with ignition ON.
-//
-// ROUTE_DEVIATION:
-//   Vehicle moves outside the route corridor.
-//
-// LOW_FUEL:
-//   Vehicle starts with a low fuel level.
-//
-// DEVICE_DISCONNECT:
-//   Simulator periodically disconnects and reconnects.
-//
-// ROUTE_COMPLETION:
-//   Vehicle completes its assigned route.
-// ============================================================================
+
+'use strict';
+
+// FREIGHT MALAWI — SIMULATION SCENARIOS
+// Every vehicle refuels once during a new trip.
+// FUEL_THEFT makes a second stop with a sudden fuel drop.
+// Existing backend rules determine alert severity.
 
 const SCENARIOS = [
   'NORMAL',
@@ -49,58 +20,40 @@ const SCENARIOS = [
   'ROUTE_COMPLETION',
 ];
 
+const REFUEL_AT = 0.42;
+const THEFT_AT = 0.62;
+
+const REFUEL_LITRES = 60;
+const THEFT_LITRES = 35;
+
+// Keep the vehicle stationary long enough for
+// the backend to establish a fuel baseline.
+const STATIONARY_BASELINE_TICKS = 3;
+const STOP_DURATION_TICKS = 6;
+
 function rand(min, max) {
-  return (
-    min +
-    Math.random() *
-      (max - min)
-  );
+  return min + Math.random() * (max - min);
 }
 
-function clamp(
-  value,
-  min,
-  max,
-) {
-  return Math.max(
-    min,
-    Math.min(max, value),
-  );
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
-function smoothToward(
-  current,
-  target,
-  maxDelta,
-) {
-  if (
-    !Number.isFinite(current)
-  ) {
+function smoothToward(current, target, maxDelta) {
+  if (!Number.isFinite(current)) {
     return target;
   }
 
-  const difference =
-    target - current;
+  const difference = target - current;
 
-  if (
-    Math.abs(difference) <=
-    maxDelta
-  ) {
+  if (Math.abs(difference) <= maxDelta) {
     return target;
   }
 
-  return (
-    current +
-    Math.sign(difference) *
-      maxDelta
-  );
+  return current + Math.sign(difference) * maxDelta;
 }
 
-function baselineTarget(
-  progressFraction,
-  tickIndex,
-) {
-  // City-entry/exit traffic.
+function baselineTarget(progressFraction, tickIndex) {
   if (
     progressFraction < 0.04 ||
     progressFraction > 0.96
@@ -108,18 +61,54 @@ function baselineTarget(
     return 42;
   }
 
-  // Long-haul M1 cruising pattern.
-  const phase =
-    Math.floor(tickIndex / 18) %
-    5;
-
   return [
     68,
     73,
     76,
     70,
     74,
-  ][phase];
+  ][Math.floor(tickIndex / 18) % 5];
+}
+
+// Automatically schedule a fuel stop.
+function beginScheduledStop(
+  scenario,
+  progressFraction,
+  state
+) {
+  if (state.fuelStop) {
+    return;
+  }
+
+  // Every truck refuels once per prepared trip.
+  if (
+    !state.refuelApplied &&
+    progressFraction >= REFUEL_AT &&
+    progressFraction < 0.95
+  ) {
+    state.fuelStop = {
+      kind: 'REFUEL',
+      parkedTicks: 0,
+      eventSent: false,
+    };
+
+    return;
+  }
+
+  // The theft scenario has a separate stop.
+  if (
+    scenario === 'FUEL_THEFT' &&
+    state.refuelApplied &&
+    !state.theftApplied &&
+    progressFraction >= THEFT_AT &&
+    progressFraction < 0.95
+  ) {
+    state.fuelStop = {
+      kind: 'THEFT',
+      parkedTicks: 0,
+      eventSent: false,
+    };
+  }
 }
 
 function speedForScenario(
@@ -127,120 +116,109 @@ function speedForScenario(
   progressFraction,
   tickIndex,
   overspeedThreshold,
-  state = {},
+  state = {}
 ) {
-  const current =
-    Number.isFinite(
-      state.currentSpeedKmh,
-    )
-      ? state.currentSpeedKmh
-      : 0;
+  beginScheduledStop(
+    scenario,
+    progressFraction,
+    state
+  );
 
-  let target;
+  const current = Number.isFinite(
+    state.currentSpeedKmh
+  )
+    ? state.currentSpeedKmh
+    : 0;
+
+  let target = baselineTarget(
+    progressFraction,
+    tickIndex
+  );
+
   let maxDelta = 8;
 
   switch (scenario) {
-    case 'OVERSPEEDING': {
+    case 'OVERSPEEDING':
       target = clamp(
-        Number(
-          overspeedThreshold || 80,
-        ) + 12,
+        Number(overspeedThreshold || 80) + 12,
         88,
-        98,
+        98
       );
-
-      // Smooth changes prevent the overspeeding vehicle from also looking like
-      // an aggressive driver.
-      maxDelta = 8;
       break;
-    }
 
-    case 'AGGRESSIVE_DRIVER': {
-      const phase =
-        Math.floor(tickIndex / 4) %
-        4;
-
+    case 'AGGRESSIVE_DRIVER':
       target = [
         35,
         105,
         25,
         100,
-      ][phase];
+      ][Math.floor(tickIndex / 4) % 4];
 
-      // Large speed changes intentionally produce genuine acceleration or
-      // braking above the backend's harsh-driving threshold.
       maxDelta = 60;
       break;
-    }
 
     case 'ROUTE_COMPLETION':
       target = 72;
       maxDelta = 7;
       break;
 
-    case 'FUEL_THEFT':
-      target =
-        progressFraction > 0.38 &&
-        progressFraction < 0.44
-          ? 0
-          : baselineTarget(
-              progressFraction,
-              tickIndex,
-            );
-
-      maxDelta = 8;
-      break;
-
-    case 'REFUEL':
-      target =
-        progressFraction > 0.58 &&
-        progressFraction < 0.63
-          ? 0
-          : baselineTarget(
-              progressFraction,
-              tickIndex,
-            );
-
-      maxDelta = 8;
-      break;
-
     case 'EXCESSIVE_IDLE':
-      target =
-        progressFraction > 0.30 &&
-        progressFraction < 0.55
-          ? 0
-          : baselineTarget(
-              progressFraction,
-              tickIndex,
-            );
+      // A bounded idle stop, so movement can resume.
+      if (
+        !state.extraIdleDone &&
+        progressFraction >= 0.30 &&
+        !state.fuelStop
+      ) {
+        state.extraIdleTicks =
+          (state.extraIdleTicks || 0) + 1;
 
-      maxDelta = 8;
+        target = 0;
+
+        if (
+          state.extraIdleTicks >= 25 &&
+          current <= 1
+        ) {
+          state.extraIdleDone = true;
+        }
+      }
       break;
 
     default:
-      target =
-        baselineTarget(
-          progressFraction,
-          tickIndex,
-        );
-
-      maxDelta = 8;
       break;
   }
 
-  const next =
-    clamp(
-      smoothToward(
-        current,
-        target,
-        maxDelta,
-      ),
-      0,
-      120,
-    );
+  // Scheduled stop overrides the driving scenario.
+  if (state.fuelStop) {
+    target = 0;
+    maxDelta = 12;
+  }
 
-  state.currentSpeedKmh =
-    next;
+  const next = clamp(
+    smoothToward(current, target, maxDelta),
+    0,
+    120
+  );
+
+  state.currentSpeedKmh = next;
+
+  const stop = state.fuelStop;
+
+  if (stop) {
+    if (next <= 0.1) {
+      stop.parkedTicks += 1;
+    } else {
+      stop.parkedTicks = 0;
+    }
+
+    // Allow several readings after the fuel event
+    // before the truck begins moving again.
+    if (
+      stop.eventSent &&
+      stop.parkedTicks >= STOP_DURATION_TICKS
+    ) {
+      state.fuelStop = null;
+    }
+  }
 
   return next;
 }
@@ -248,29 +226,33 @@ function speedForScenario(
 function fuelEventForScenario(
   scenario,
   progressFraction,
-  state,
+  state = {}
 ) {
-  if (
-    scenario ===
-      'FUEL_THEFT' &&
-    progressFraction >= 0.40 &&
-    progressFraction < 0.405 &&
-    !state.theftApplied
-  ) {
-    state.theftApplied = true;
+  const stop = state.fuelStop;
 
-    return -18;
+  if (
+    !stop ||
+    stop.eventSent ||
+    stop.parkedTicks < STATIONARY_BASELINE_TICKS
+  ) {
+    return 0;
+  }
+
+  stop.eventSent = true;
+
+  if (stop.kind === 'REFUEL') {
+    state.refuelApplied = true;
+
+    return REFUEL_LITRES;
   }
 
   if (
-    scenario === 'REFUEL' &&
-    progressFraction >= 0.60 &&
-    progressFraction < 0.605 &&
-    !state.refuelApplied
+    stop.kind === 'THEFT' &&
+    scenario === 'FUEL_THEFT'
   ) {
-    state.refuelApplied = true;
+    state.theftApplied = true;
 
-    return 70;
+    return -THEFT_LITRES;
   }
 
   return 0;
@@ -279,64 +261,42 @@ function fuelEventForScenario(
 function cargoWeightForScenario(
   scenario,
   payloadCapacityKg,
-  requestedWeightKg,
+  requestedWeightKg
 ) {
-  const capacity =
-    Math.max(
-      1,
-      Number(
-        payloadCapacityKg ||
-          12000,
-      ),
-    );
+  const capacity = Math.max(
+    1,
+    Number(payloadCapacityKg || 12000)
+  );
 
-  const requested =
-    Number(requestedWeightKg);
+  const requested = Number(requestedWeightKg);
 
-  if (
-    scenario ===
-    'OVERWEIGHT'
-  ) {
-    return Math.round(
-      capacity * 1.18,
-    );
+  if (scenario === 'OVERWEIGHT') {
+    return Math.round(capacity * 1.18);
   }
 
-  // If Logbook supplied a cargo weight, that exact weight is used for the
-  // whole trip.
   if (
     Number.isFinite(requested) &&
     requested > 0
   ) {
-    return Math.round(
-      requested * 100,
-    ) / 100;
+    return Math.round(requested * 100) / 100;
   }
 
-  // Default loaded truck = 75% of rated payload.
-  return Math.round(
-    capacity * 0.75,
-  );
+  return Math.round(capacity * 0.75);
 }
 
 function isDeviating(
   scenario,
-  progressFraction,
+  progressFraction
 ) {
   return (
-    scenario ===
-      'ROUTE_DEVIATION' &&
+    scenario === 'ROUTE_DEVIATION' &&
     progressFraction > 0.45 &&
     progressFraction < 0.55
   );
 }
 
-function initialFuelPercent(
-  scenario,
-) {
-  if (
-    scenario === 'LOW_FUEL'
-  ) {
+function initialFuelPercent(scenario) {
+  if (scenario === 'LOW_FUEL') {
     return rand(8, 13);
   }
 
@@ -345,11 +305,10 @@ function initialFuelPercent(
 
 function shouldDisconnectNow(
   scenario,
-  tickIndex,
+  tickIndex
 ) {
   return (
-    scenario ===
-      'DEVICE_DISCONNECT' &&
+    scenario === 'DEVICE_DISCONNECT' &&
     tickIndex > 0 &&
     tickIndex % 36 === 0
   );
