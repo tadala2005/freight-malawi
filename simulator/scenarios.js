@@ -2,8 +2,8 @@
 'use strict';
 
 // FREIGHT MALAWI — SIMULATION SCENARIOS
-// These functions are called by simulate.js.
-// Keep the exported functions and their arguments unchanged.
+// Every truck refuels to 100% of its configured tank capacity.
+// Truck 2 also demonstrates a stationary fuel-theft event.
 
 const SCENARIOS = [
   'NORMAL',
@@ -19,16 +19,17 @@ const SCENARIOS = [
   'ROUTE_COMPLETION',
 ];
 
-// Earlier, deterministic events for project demonstration.
+// Demonstration-friendly event positions.
 const REFUEL_AT = 0.08;
 const THEFT_AT = 0.18;
 
-const REFUEL_LITRES = 60;
+// Fuel theft removes 35 litres while stationary.
 const THEFT_LITRES = 35;
 
-// Four stationary readings before changing fuel.
-// Eight stationary readings before driving resumes.
+// Number of stationary readings before the event.
 const BASELINE_TICKS = 4;
+
+// Total stationary readings before driving resumes.
 const STOP_TICKS = 8;
 
 const rand = (min, max) =>
@@ -38,7 +39,9 @@ const clamp = (value, min, max) =>
   Math.max(min, Math.min(max, value));
 
 function smoothToward(current, target, maximumChange) {
-  if (!Number.isFinite(current)) return target;
+  if (!Number.isFinite(current)) {
+    return target;
+  }
 
   const difference = target - current;
 
@@ -55,19 +58,16 @@ function baselineTarget(progress, tick) {
     return 42;
   }
 
-  return [
-    68,
-    73,
-    76,
-    70,
-    74
-  ][Math.floor(tick / 18) % 5];
+  return [68, 73, 76, 70, 74][
+    Math.floor(tick / 18) % 5
+  ];
 }
 
+// Schedule one refuel for every truck.
+// Schedule a separate theft stop for FUEL_THEFT.
 function beginScheduledStop(scenario, progress, state) {
   if (state.fuelStop) return;
 
-  // Every vehicle refuels once per new trip.
   if (
     !state.refuelApplied &&
     progress >= REFUEL_AT &&
@@ -82,7 +82,6 @@ function beginScheduledStop(scenario, progress, state) {
     return;
   }
 
-  // Truck 2 makes a second stop for fuel theft.
   if (
     scenario === 'FUEL_THEFT' &&
     state.refuelApplied &&
@@ -98,6 +97,8 @@ function beginScheduledStop(scenario, progress, state) {
   }
 }
 
+// Calculate simulated driving speed.
+// Fuel stops override movement until the event is complete.
 function speedForScenario(
   scenario,
   progress,
@@ -107,9 +108,7 @@ function speedForScenario(
 ) {
   beginScheduledStop(scenario, progress, state);
 
-  const current = Number.isFinite(
-    state.currentSpeedKmh
-  )
+  const current = Number.isFinite(state.currentSpeedKmh)
     ? state.currentSpeedKmh
     : 0;
 
@@ -126,13 +125,9 @@ function speedForScenario(
       break;
 
     case 'AGGRESSIVE_DRIVER':
-      target = [
-        35,
-        105,
-        25,
-        100
-      ][Math.floor(tick / 4) % 4];
-
+      target = [35, 105, 25, 100][
+        Math.floor(tick / 4) % 4
+      ];
       maximumChange = 60;
       break;
 
@@ -165,8 +160,7 @@ function speedForScenario(
       break;
   }
 
-  // Fuel events require several consecutive readings
-  // showing that the vehicle is stationary.
+  // Ensure vehicle is stationary for refuelling/theft.
   if (state.fuelStop) {
     target = 0;
     maximumChange = 12;
@@ -187,8 +181,6 @@ function speedForScenario(
       ? stop.parkedTicks + 1
       : 0;
 
-    // Hold the vehicle stationary after refuelling
-    // or theft so the backend receives follow-up data.
     if (
       stop.eventSent &&
       stop.parkedTicks >= STOP_TICKS
@@ -200,10 +192,24 @@ function speedForScenario(
   return speed;
 }
 
+/*
+ * FUEL EVENTS
+ *
+ * Refuelling:
+ *   Amount added = tank capacity - current fuel
+ *
+ * This ensures the tank reaches 100%, not a fixed
+ * increase of 60 litres.
+ *
+ * Fuel theft:
+ *   Remove 35 litres while stationary.
+ */
 function fuelEventForScenario(
   scenario,
   progress,
-  state = {}
+  state = {},
+  currentFuelLitres,
+  tankCapacity
 ) {
   const stop = state.fuelStop;
 
@@ -215,23 +221,56 @@ function fuelEventForScenario(
     return 0;
   }
 
-  stop.eventSent = true;
-
+  // =====================================
+  // REFUELLING — FILL TO 100%
+  // =====================================
   if (stop.kind === 'REFUEL') {
+    const capacity = Number(tankCapacity);
+    const current = Number(currentFuelLitres);
+
+    if (
+      !Number.isFinite(capacity) ||
+      capacity <= 0 ||
+      !Number.isFinite(current)
+    ) {
+      console.error(
+        '[SIM EVENT] REFUEL skipped: invalid tank capacity or fuel reading'
+      );
+
+      return 0;
+    }
+
+    const remainingFuel = clamp(
+      current,
+      0,
+      capacity
+    );
+
+    const litresAdded = Math.max(
+      0,
+      capacity - remainingFuel
+    );
+
+    stop.eventSent = true;
     state.refuelApplied = true;
 
     console.log(
-      `[SIM EVENT] REFUEL +${REFUEL_LITRES} L at ` +
-      `${(progress * 100).toFixed(1)}% route`
+      `[SIM EVENT] REFUEL +${litresAdded.toFixed(2)} L ` +
+      `-> FULL ${capacity} L (100%) ` +
+      `at ${(progress * 100).toFixed(1)}% route`
     );
 
-    return REFUEL_LITRES;
+    return litresAdded;
   }
 
+  // =====================================
+  // FUEL THEFT — TRUCK 2
+  // =====================================
   if (
     stop.kind === 'THEFT' &&
     scenario === 'FUEL_THEFT'
   ) {
+    stop.eventSent = true;
     state.theftApplied = true;
 
     console.log(
@@ -246,6 +285,7 @@ function fuelEventForScenario(
   return 0;
 }
 
+// Cargo weight and load scenarios.
 function cargoWeightForScenario(
   scenario,
   payloadCapacityKg,
@@ -268,6 +308,7 @@ function cargoWeightForScenario(
     : Math.round(capacity * 0.75);
 }
 
+// Route deviation scenario.
 function isDeviating(scenario, progress) {
   return (
     scenario === 'ROUTE_DEVIATION' &&
@@ -276,12 +317,16 @@ function isDeviating(scenario, progress) {
   );
 }
 
+// Starting fuel level.
 function initialFuelPercent(scenario) {
-  return scenario === 'LOW_FUEL'
-    ? rand(8, 13)
-    : 82;
+  if (scenario === 'LOW_FUEL') {
+    return rand(8, 13);
+  }
+
+  return 82;
 }
 
+// Device disconnect scenario.
 function shouldDisconnectNow(scenario, tick) {
   return (
     scenario === 'DEVICE_DISCONNECT' &&
