@@ -154,69 +154,73 @@ button { font-family: inherit; }
 .reports-page p, .reports-page .fm-table td span { color: var(--report-muted) !important; }
 @media (max-width: 700px) { .fm-page-head { align-items: stretch; } .fm-field-inline { width: 100%; justify-content: space-between; } .fm-field-inline select { flex: 1; min-width: 0; } }
 
-/* ==============================================
+
+/* ==================================================
    FREIGHT MALAWI — DASHBOARD HIGH CONTRAST
-   White text on dark navy backgrounds
-   ============================================== */
+   Improve text visibility without changing ignition.
+   ================================================== */
 
-/* Apply only to the Fleet Dashboard */
-.app-content:has(.dashboard-grid) {
-  --fm-muted: #FFFFFF;
-  --fm-text-secondary: #FFFFFF;
-}
-
-/* KPI numbers and icons */
-.app-content:has(.dashboard-grid) .kpi-grid {
-  --fm-navy: #FFFFFF;
-}
-
-/* Dashboard KPI card text */
+/* KPI cards: white labels, numbers and descriptions */
 .app-content:has(.dashboard-grid) .kpi-grid .fm-card {
+  --fm-navy: #F8FAFC;
+  --fm-muted: #FFFFFF;
+}
+
+/* White text on existing dark backgrounds */
+.app-content:has(.dashboard-grid)
+[style*="color: var(--fm-muted)"]:not(button) {
+  color: #FFFFFF !important;
+}
+
+/* Dashboard filter label */
+.app-content:has(.dashboard-grid)
+.fm-field-inline > span {
   color: #FFFFFF;
 }
 
-/* Secondary badges: replace gray text with white */
-.app-content:has(.dashboard-grid) .fm-badge-muted {
-  color: #FFFFFF;
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.25);
-}
-
-/* Vehicle selection dropdown */
-.app-content:has(.dashboard-grid) .fm-field-inline select {
-  color: #FFFFFF;
+/* Vehicle selection */
+.app-content:has(.dashboard-grid)
+.fm-field-inline select {
   background-color: #13263A;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #FFFFFF;
+  border-color: #52677E;
 }
 
-/* Dropdown options */
-.app-content:has(.dashboard-grid) .fm-field-inline select option {
-  color: #FFFFFF;
+.app-content:has(.dashboard-grid)
+.fm-field-inline select option {
   background-color: #0D1B2A;
-}
-
-/* Maintain white text on dashboard action buttons */
-.app-content:has(.dashboard-grid) .fm-btn-ghost {
   color: #FFFFFF;
 }
 
-/* Accessible focus states */
-.app-content:has(.dashboard-grid) button:focus-visible,
-.app-content:has(.dashboard-grid) select:focus-visible {
+/* Muted status badges: brighter text */
+.app-content:has(.dashboard-grid)
+.fm-badge-muted {
+  color: #FFFFFF;
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+/* Empty-state descriptions */
+.app-content:has(.dashboard-grid)
+.empty-state {
+  color: #FFFFFF;
+}
+
+/* Improve visibility of the dashboard's main text */
+.app-content:has(.dashboard-grid)
+.fm-page-head p {
+  color: #FFFFFF !important;
+}
+
+/* Accessible selection focus */
+.app-content:has(.dashboard-grid)
+.fm-field-inline select:focus-visible {
   outline: 2px solid #22D3EE;
   outline-offset: 2px;
 }
 
-/* Freight Malawi — High-contrast dashboard text */
+/*
+   IGNITION SWITCH:
+   No changes to background, position, animation
+   or ON/OFF behaviour.
+*/
 
-.app-content:has(.dashboard-grid) {
-  --fm-muted: #FFFFFF;
-  --fm-text-secondary: #FFFFFF;
-}
-
-/* Preserve original ignition button colors */
-.app-content:has(.dashboard-grid) .kpi-grid {
-  --fm-navy: #FFFFFF;
-}
-
-/* Do not override ignition switch styles */
