@@ -2,9 +2,8 @@
 'use strict';
 
 // FREIGHT MALAWI — SIMULATION SCENARIOS
-// Every vehicle refuels once during a new trip.
-// FUEL_THEFT makes a second stop with a sudden fuel drop.
-// Existing backend rules determine alert severity.
+// These functions are called by simulate.js.
+// Keep the exported functions and their arguments unchanged.
 
 const SCENARIOS = [
   'NORMAL',
@@ -20,44 +19,39 @@ const SCENARIOS = [
   'ROUTE_COMPLETION',
 ];
 
-const REFUEL_AT = 0.42;
-const THEFT_AT = 0.62;
+// Earlier, deterministic events for project demonstration.
+const REFUEL_AT = 0.08;
+const THEFT_AT = 0.18;
 
 const REFUEL_LITRES = 60;
 const THEFT_LITRES = 35;
 
-// Keep the vehicle stationary long enough for
-// the backend to establish a fuel baseline.
-const STATIONARY_BASELINE_TICKS = 3;
-const STOP_DURATION_TICKS = 6;
+// Four stationary readings before changing fuel.
+// Eight stationary readings before driving resumes.
+const BASELINE_TICKS = 4;
+const STOP_TICKS = 8;
 
-function rand(min, max) {
-  return min + Math.random() * (max - min);
-}
+const rand = (min, max) =>
+  min + Math.random() * (max - min);
 
-function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
+const clamp = (value, min, max) =>
+  Math.max(min, Math.min(max, value));
 
-function smoothToward(current, target, maxDelta) {
-  if (!Number.isFinite(current)) {
-    return target;
-  }
+function smoothToward(current, target, maximumChange) {
+  if (!Number.isFinite(current)) return target;
 
   const difference = target - current;
 
-  if (Math.abs(difference) <= maxDelta) {
+  if (Math.abs(difference) <= maximumChange) {
     return target;
   }
 
-  return current + Math.sign(difference) * maxDelta;
+  return current +
+    Math.sign(difference) * maximumChange;
 }
 
-function baselineTarget(progressFraction, tickIndex) {
-  if (
-    progressFraction < 0.04 ||
-    progressFraction > 0.96
-  ) {
+function baselineTarget(progress, tick) {
+  if (progress < 0.04 || progress > 0.96) {
     return 42;
   }
 
@@ -66,63 +60,52 @@ function baselineTarget(progressFraction, tickIndex) {
     73,
     76,
     70,
-    74,
-  ][Math.floor(tickIndex / 18) % 5];
+    74
+  ][Math.floor(tick / 18) % 5];
 }
 
-// Automatically schedule a fuel stop.
-function beginScheduledStop(
-  scenario,
-  progressFraction,
-  state
-) {
-  if (state.fuelStop) {
-    return;
-  }
+function beginScheduledStop(scenario, progress, state) {
+  if (state.fuelStop) return;
 
-  // Every truck refuels once per prepared trip.
+  // Every vehicle refuels once per new trip.
   if (
     !state.refuelApplied &&
-    progressFraction >= REFUEL_AT &&
-    progressFraction < 0.95
+    progress >= REFUEL_AT &&
+    progress < 0.95
   ) {
     state.fuelStop = {
       kind: 'REFUEL',
       parkedTicks: 0,
-      eventSent: false,
+      eventSent: false
     };
 
     return;
   }
 
-  // The theft scenario has a separate stop.
+  // Truck 2 makes a second stop for fuel theft.
   if (
     scenario === 'FUEL_THEFT' &&
     state.refuelApplied &&
     !state.theftApplied &&
-    progressFraction >= THEFT_AT &&
-    progressFraction < 0.95
+    progress >= THEFT_AT &&
+    progress < 0.95
   ) {
     state.fuelStop = {
       kind: 'THEFT',
       parkedTicks: 0,
-      eventSent: false,
+      eventSent: false
     };
   }
 }
 
 function speedForScenario(
   scenario,
-  progressFraction,
-  tickIndex,
+  progress,
+  tick,
   overspeedThreshold,
   state = {}
 ) {
-  beginScheduledStop(
-    scenario,
-    progressFraction,
-    state
-  );
+  beginScheduledStop(scenario, progress, state);
 
   const current = Number.isFinite(
     state.currentSpeedKmh
@@ -130,12 +113,8 @@ function speedForScenario(
     ? state.currentSpeedKmh
     : 0;
 
-  let target = baselineTarget(
-    progressFraction,
-    tickIndex
-  );
-
-  let maxDelta = 8;
+  let target = baselineTarget(progress, tick);
+  let maximumChange = 8;
 
   switch (scenario) {
     case 'OVERSPEEDING':
@@ -151,22 +130,21 @@ function speedForScenario(
         35,
         105,
         25,
-        100,
-      ][Math.floor(tickIndex / 4) % 4];
+        100
+      ][Math.floor(tick / 4) % 4];
 
-      maxDelta = 60;
+      maximumChange = 60;
       break;
 
     case 'ROUTE_COMPLETION':
       target = 72;
-      maxDelta = 7;
+      maximumChange = 7;
       break;
 
     case 'EXCESSIVE_IDLE':
-      // A bounded idle stop, so movement can resume.
       if (
         !state.extraIdleDone &&
-        progressFraction >= 0.30 &&
+        progress >= 0.30 &&
         !state.fuelStop
       ) {
         state.extraIdleTicks =
@@ -187,45 +165,44 @@ function speedForScenario(
       break;
   }
 
-  // Scheduled stop overrides the driving scenario.
+  // Fuel events require several consecutive readings
+  // showing that the vehicle is stationary.
   if (state.fuelStop) {
     target = 0;
-    maxDelta = 12;
+    maximumChange = 12;
   }
 
-  const next = clamp(
-    smoothToward(current, target, maxDelta),
+  const speed = clamp(
+    smoothToward(current, target, maximumChange),
     0,
     120
   );
 
-  state.currentSpeedKmh = next;
+  state.currentSpeedKmh = speed;
 
-  const stop = state.fuelStop;
+  if (state.fuelStop) {
+    const stop = state.fuelStop;
 
-  if (stop) {
-    if (next <= 0.1) {
-      stop.parkedTicks += 1;
-    } else {
-      stop.parkedTicks = 0;
-    }
+    stop.parkedTicks = speed <= 0.1
+      ? stop.parkedTicks + 1
+      : 0;
 
-    // Allow several readings after the fuel event
-    // before the truck begins moving again.
+    // Hold the vehicle stationary after refuelling
+    // or theft so the backend receives follow-up data.
     if (
       stop.eventSent &&
-      stop.parkedTicks >= STOP_DURATION_TICKS
+      stop.parkedTicks >= STOP_TICKS
     ) {
       state.fuelStop = null;
     }
   }
 
-  return next;
+  return speed;
 }
 
 function fuelEventForScenario(
   scenario,
-  progressFraction,
+  progress,
   state = {}
 ) {
   const stop = state.fuelStop;
@@ -233,7 +210,7 @@ function fuelEventForScenario(
   if (
     !stop ||
     stop.eventSent ||
-    stop.parkedTicks < STATIONARY_BASELINE_TICKS
+    stop.parkedTicks < BASELINE_TICKS
   ) {
     return 0;
   }
@@ -243,6 +220,11 @@ function fuelEventForScenario(
   if (stop.kind === 'REFUEL') {
     state.refuelApplied = true;
 
+    console.log(
+      `[SIM EVENT] REFUEL +${REFUEL_LITRES} L at ` +
+      `${(progress * 100).toFixed(1)}% route`
+    );
+
     return REFUEL_LITRES;
   }
 
@@ -251,6 +233,12 @@ function fuelEventForScenario(
     scenario === 'FUEL_THEFT'
   ) {
     state.theftApplied = true;
+
+    console.log(
+      `[SIM EVENT] THEFT -${THEFT_LITRES} L ` +
+      `while STOPPED at ` +
+      `${(progress * 100).toFixed(1)}% route`
+    );
 
     return -THEFT_LITRES;
   }
@@ -268,49 +256,37 @@ function cargoWeightForScenario(
     Number(payloadCapacityKg || 12000)
   );
 
-  const requested = Number(requestedWeightKg);
-
   if (scenario === 'OVERWEIGHT') {
     return Math.round(capacity * 1.18);
   }
 
-  if (
-    Number.isFinite(requested) &&
-    requested > 0
-  ) {
-    return Math.round(requested * 100) / 100;
-  }
+  const requested = Number(requestedWeightKg);
 
-  return Math.round(capacity * 0.75);
+  return Number.isFinite(requested) &&
+    requested > 0
+    ? Math.round(requested * 100) / 100
+    : Math.round(capacity * 0.75);
 }
 
-function isDeviating(
-  scenario,
-  progressFraction
-) {
+function isDeviating(scenario, progress) {
   return (
     scenario === 'ROUTE_DEVIATION' &&
-    progressFraction > 0.45 &&
-    progressFraction < 0.55
+    progress > 0.45 &&
+    progress < 0.55
   );
 }
 
 function initialFuelPercent(scenario) {
-  if (scenario === 'LOW_FUEL') {
-    return rand(8, 13);
-  }
-
-  return 82;
+  return scenario === 'LOW_FUEL'
+    ? rand(8, 13)
+    : 82;
 }
 
-function shouldDisconnectNow(
-  scenario,
-  tickIndex
-) {
+function shouldDisconnectNow(scenario, tick) {
   return (
     scenario === 'DEVICE_DISCONNECT' &&
-    tickIndex > 0 &&
-    tickIndex % 36 === 0
+    tick > 0 &&
+    tick % 36 === 0
   );
 }
 
@@ -322,5 +298,5 @@ module.exports = {
   cargoWeightForScenario,
   isDeviating,
   initialFuelPercent,
-  shouldDisconnectNow,
+  shouldDisconnectNow
 };
