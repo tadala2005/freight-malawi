@@ -1,148 +1,178 @@
-
 'use strict';
 
 const express = require('express');
+const { pool } = require('../config/db');
 const vehicleModel = require('../models/vehicleModel');
 const telemetryModel = require('../models/telemetryModel');
-const { deviceAuthMiddleware } = require('../middleware/deviceAuth');
-const { telemetryLimiter } = require('../middleware/rateLimit');
-const { authMiddleware } = require('../middleware/auth');
-const { AppError } = require('../middleware/errorHandler');
+
+const {
+  deviceAuthMiddleware
+} = require('../middleware/deviceAuth');
+
+const {
+  telemetryLimiter
+} = require('../middleware/rateLimit');
+
+const {
+  authMiddleware
+} = require('../middleware/auth');
+
+const {
+  AppError
+} = require('../middleware/errorHandler');
+
 const {
   OFFLINE_THRESHOLD_SECONDS
 } = require('../services/notificationService');
-const { emitToUser } = require('../sockets/dashboardSocket');
+
+const {
+  emitToUser
+} = require('../sockets/dashboardSocket');
 
 const router = express.Router();
 
-const HARDWARE_DEVICE_ID = 'ESP32-HW-001';
-const SENSOR_FRESH_MS = 20000;
-
-// Single-instance cache for the physical fuel monitor.
-// The ESP32 sends fuel readings without changing vehicle
-// ignition, speed, location or trip status.
-const fuelReadings = new Map();
+const DEVICE = 'ESP32-HW-001';
+const FRESH_MS = 10000;
 
 function requireHardware(req, res, next) {
-  if (req.vehicle?.device_id !== HARDWARE_DEVICE_ID) {
-    return res.status(403).json({
-      success: false,
-      error: {
-        code: 'HARDWARE_ONLY',
-        message: 'This endpoint accepts the hardware fuel device only.'
-      }
-    });
+  if (req.vehicle.device_id !== DEVICE) {
+    return next(
+      new AppError(
+        'Hardware device required.',
+        403,
+        'HARDWARE_ONLY'
+      )
+    );
   }
 
   next();
 }
 
-function getReading(vehicleId) {
-  const reading = fuelReadings.get(String(vehicleId));
+async function getReading(vehicle) {
+  const [rows] = await pool.execute(
+    `SELECT fuel_percent, observed_at
+     FROM hardware_fuel
+     WHERE vehicle_id = ?`,
+    [vehicle.id]
+  );
 
-  if (!reading) {
-    return {
-      fuel_percent: null,
-      observed_at: null,
-      age_seconds: null,
-      fresh: false
-    };
-  }
+  const row = rows[0];
 
-  const age = Date.now() - Date.parse(reading.observed_at);
+  const age = row
+    ? Date.now() - new Date(row.observed_at).getTime()
+    : Infinity;
+
+  const percent = row?.fuel_percent == null
+    ? null
+    : Number(row.fuel_percent);
 
   return {
-    ...reading,
-    age_seconds: Math.max(0, Math.floor(age / 1000)),
-    fresh: age >= 0 && age <= SENSOR_FRESH_MS
+    vehicle_id: vehicle.id,
+    device_id: vehicle.device_id,
+
+    fuel_percent: percent,
+
+    fuel_level_litres: percent === null
+      ? null
+      : Number(
+          (
+            percent *
+            Number(vehicle.fuel_tank_capacity) /
+            100
+          ).toFixed(2)
+        ),
+
+    observed_at: row?.observed_at || null,
+
+    age_seconds: Number.isFinite(age)
+      ? Math.max(0, Math.floor(age / 1000))
+      : null,
+
+    fresh:
+      percent !== null &&
+      age >= 0 &&
+      age <= FRESH_MS
   };
 }
-
-// =====================================================
-// ESP32: POST THE ACTUAL ULTRASONIC FUEL READING
-// POST /api/devices/fuel
-// =====================================================
 
 router.post(
   '/fuel',
   telemetryLimiter,
   deviceAuthMiddleware,
   requireHardware,
-  (req, res) => {
-    const raw = req.body?.fuel_percent;
-    const percentage = Number(raw);
+  async (req, res, next) => {
+    try {
+      const raw = req.body?.fuel_percent;
+      const invalidSensor = req.body?.sensor_valid === false;
 
-    if (
-      raw === undefined ||
-      raw === null ||
-      raw === '' ||
-      !Number.isFinite(percentage) ||
-      percentage < 0 ||
-      percentage > 100
-    ) {
-      return res.status(400).json({
-        success: false,
-        error: {
-          code: 'INVALID_FUEL',
-          message: 'fuel_percent must be between 0 and 100.'
-        }
+      if (
+        !invalidSensor &&
+        (
+          typeof raw !== 'number' ||
+          !Number.isFinite(raw) ||
+          raw < 0 ||
+          raw > 100
+        )
+      ) {
+        throw new AppError(
+          'fuel_percent must be a number between 0 and 100.',
+          400,
+          'INVALID_FUEL'
+        );
+      }
+
+      const percent = invalidSensor
+        ? null
+        : Number(raw.toFixed(2));
+
+      await pool.execute(
+        `INSERT INTO hardware_fuel
+           (vehicle_id, fuel_percent, observed_at)
+         VALUES (?, ?, NOW())
+         ON CONFLICT (vehicle_id) DO UPDATE
+         SET fuel_percent = EXCLUDED.fuel_percent,
+             observed_at = EXCLUDED.observed_at`,
+        [req.vehicle.id, percent]
+      );
+
+      const data = await getReading(req.vehicle);
+
+      emitToUser(
+        req.vehicle.user_id,
+        'hardware:fuel',
+        data
+      );
+
+      res.status(201).json({
+        success: true,
+        data
       });
+    } catch (error) {
+      next(error);
     }
-
-    const reading = {
-      fuel_percent: Math.round(percentage * 100) / 100,
-      observed_at: new Date().toISOString()
-    };
-
-    fuelReadings.set(String(req.vehicle.id), reading);
-
-    const capacity = Number(req.vehicle.fuel_tank_capacity) || 0;
-
-    // Notify only the vehicle owner's dashboard.
-    emitToUser(req.vehicle.user_id, 'hardware:fuel', {
-      vehicle_id: req.vehicle.id,
-      device_id: req.vehicle.device_id,
-      fuel_percent: reading.fuel_percent,
-      fuel_level_litres:
-        Math.round(reading.fuel_percent * capacity) / 100,
-      observed_at: reading.observed_at,
-      fresh: true
-    });
-
-    return res.status(201).json({
-      success: true,
-      data: reading
-    });
   }
 );
-
-// =====================================================
-// HYBRID SIMULATOR: READ THE SENSOR FUEL
-// GET /api/devices/fuel
-// =====================================================
 
 router.get(
   '/fuel',
   telemetryLimiter,
   deviceAuthMiddleware,
   requireHardware,
-  (req, res) => {
-    res.set('Cache-Control', 'no-store');
+  async (req, res, next) => {
+    try {
+      res.set('Cache-Control', 'no-store');
 
-    return res.json({
-      success: true,
-      data: getReading(req.vehicle.id)
-    });
+      res.json({
+        success: true,
+        data: await getReading(req.vehicle)
+      });
+    } catch (error) {
+      next(error);
+    }
   }
 );
 
-// All remaining routes use normal manager login.
 router.use(authMiddleware);
-
-// =====================================================
-// DASHBOARD: READ SENSOR FUEL INDEPENDENT OF IGNITION
-// GET /api/devices/:id/fuel
-// =====================================================
 
 router.get('/:id/fuel', async (req, res, next) => {
   try {
@@ -151,51 +181,24 @@ router.get('/:id/fuel', async (req, res, next) => {
       req.user.id
     );
 
-    if (!vehicle) {
+    if (!vehicle || vehicle.device_id !== DEVICE) {
       throw new AppError(
-        'Vehicle not found.',
+        'Hardware vehicle not found.',
         404,
         'NOT_FOUND'
       );
     }
-
-    if (vehicle.device_id !== HARDWARE_DEVICE_ID) {
-      throw new AppError(
-        'This vehicle has no physical fuel sensor.',
-        404,
-        'NOT_FOUND'
-      );
-    }
-
-    const reading = getReading(vehicle.id);
-    const capacity = Number(vehicle.fuel_tank_capacity) || 0;
 
     res.set('Cache-Control', 'no-store');
 
-    return res.json({
+    res.json({
       success: true,
-      data: {
-        vehicle_id: vehicle.id,
-        device_id: vehicle.device_id,
-        fuel_percent: reading.fuel_percent,
-        fuel_level_litres:
-          reading.fuel_percent === null
-            ? null
-            : Math.round(reading.fuel_percent * capacity) / 100,
-        observed_at: reading.observed_at,
-        age_seconds: reading.age_seconds,
-        fresh: reading.fresh
-      }
+      data: await getReading(vehicle)
     });
-  } catch (err) {
-    next(err);
+  } catch (error) {
+    next(error);
   }
 });
-
-// =====================================================
-// ORIGINAL VEHICLE STATUS ENDPOINT — PRESERVED
-// GET /api/devices/:id/status
-// =====================================================
 
 router.get('/:id/status', async (req, res, next) => {
   try {
@@ -212,23 +215,22 @@ router.get('/:id/status', async (req, res, next) => {
       );
     }
 
-    const latest = await telemetryModel.getLatestForVehicle(
-      vehicle.id
-    );
-
-    return res.json({
+    res.json({
       success: true,
+
       data: {
         vehicle_id: vehicle.id,
         device_id: vehicle.device_id,
         status: vehicle.current_status,
         last_seen_at: vehicle.last_seen_at,
         offline_threshold_seconds: OFFLINE_THRESHOLD_SECONDS,
-        last_reading: latest
+
+        last_reading:
+          await telemetryModel.getLatestForVehicle(vehicle.id)
       }
     });
-  } catch (err) {
-    next(err);
+  } catch (error) {
+    next(error);
   }
 });
 
