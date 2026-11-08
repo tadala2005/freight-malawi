@@ -8,6 +8,7 @@ function observe(previous, reading) {
   const litres = Number(reading.fuel_level_litres);
   const capacity = Number(reading.fuel_tank_capacity);
 
+  // Initial demonstration thresholds, requiring physical validation.
   const threshold = Math.max(
     5,
     capacity * (reading.physical_fuel ? 0.08 : 0.03)
@@ -60,7 +61,18 @@ function observe(previous, reading) {
 
   state.result = {};
 
-  if (!state.latched && direction) {
+  const sample = reading.physical_fuel
+    ? String(
+        reading.sensor_observed_at ||
+        reading.telemetry_uuid
+      )
+    : reading.telemetry_uuid;
+
+  if (
+    !state.latched &&
+    direction &&
+    sample !== state.lastSample
+  ) {
     state.confirmations =
       direction === state.direction
         ? state.confirmations + 1
@@ -113,14 +125,17 @@ function observe(previous, reading) {
     state.quietSince = now;
   }
 
-  // Rearm after the level settles.
-  if (now - state.quietSince >= 10000) {
+  if (
+    now - state.quietSince >= 10000 &&
+    (state.latched || !direction)
+  ) {
     state.baseline = litres;
     state.latched = false;
     state.confirmations = 0;
     state.quietSince = now;
   }
 
+  state.lastSample = sample;
   state.lastFuel = litres;
   state.lastAt = now;
   state.uuid = reading.telemetry_uuid;
