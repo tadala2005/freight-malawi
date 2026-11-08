@@ -8,20 +8,14 @@ const { AppError } = require('../middleware/errorHandler');
 const queues = new Map();
 
 function bad(message) {
-  throw new AppError(
-    message,
-    400,
-    'INVALID_TELEMETRY'
-  );
+  throw new AppError(message, 400, 'INVALID_TELEMETRY');
 }
 
 function normalise(vehicle, input) {
   const p = { ...input };
 
   function number(key, min, max, optional = false) {
-    if (optional && p[key] === undefined) {
-      p[key] = 0;
-    }
+    if (optional && p[key] === undefined) p[key] = 0;
 
     const value = p[key];
 
@@ -60,17 +54,13 @@ function normalise(vehicle, input) {
   const calculatedPercent =
     p.fuel_level_litres * 100 / capacity;
 
-  if (
-    Math.abs(p.fuel_percent - calculatedPercent) > 0.25
-  ) {
+  if (Math.abs(p.fuel_percent - calculatedPercent) > 0.25) {
     bad(
       'Fuel litres/percentage disagree with the vehicle tank capacity.'
     );
   }
 
-  p.fuel_percent = Number(
-    calculatedPercent.toFixed(2)
-  );
+  p.fuel_percent = Number(calculatedPercent.toFixed(2));
 
   if (typeof p.ignition_on !== 'boolean') {
     bad('ignition_on must be true or false.');
@@ -97,9 +87,7 @@ function normalise(vehicle, input) {
     time > Date.now() + 5000 ||
     time < Date.now() - 60000
   ) {
-    bad(
-      'Telemetry timestamp is invalid, stale or in the future.'
-    );
+    bad('Telemetry timestamp is invalid, stale or in the future.');
   }
 
   p.recorded_at = new Date(time).toISOString();
@@ -110,104 +98,88 @@ function normalise(vehicle, input) {
 function guardedProcess(process) {
   return function (vehicle, payload) {
     const key = String(vehicle.id);
+    const previousTask = queues.get(key) || Promise.resolve();
 
-    const previousTask =
-      queues.get(key) || Promise.resolve();
+    const task = previousTask.catch(() => {}).then(async () => {
+      const freshVehicle =
+        await vehicles.getByIdInternal(vehicle.id);
 
-    const task = previousTask
-      .catch(() => {})
-      .then(async () => {
-        const freshVehicle =
-          await vehicles.getByIdInternal(vehicle.id);
+      if (!freshVehicle) bad('Vehicle no longer exists.');
 
-        if (!freshVehicle) {
-          bad('Vehicle no longer exists.');
-        }
-
-        if (
-          freshVehicle.device_id === 'ESP32-HW-001'
-        ) {
-          const [rows] = await pool.execute(
-            `SELECT fuel_percent, observed_at
-             FROM hardware_fuel
-             WHERE vehicle_id = ?`,
-            [vehicle.id]
-          );
-
-          const sensor = rows[0];
-
-          const age = sensor
-            ? Date.now() -
-              new Date(sensor.observed_at).getTime()
-            : Infinity;
-
-          if (
-            sensor?.fuel_percent == null ||
-            age < 0 ||
-            age > 10000
-          ) {
-            bad('Physical fuel sensor is stale or invalid.');
-          }
-
-          const percent = Number(sensor.fuel_percent);
-
-          payload = {
-            ...payload,
-            fuel_percent: percent,
-
-            fuel_level_litres:
-              percent *
-              Number(freshVehicle.fuel_tank_capacity) /
-              100
-          };
-        }
-
-        const p = normalise(
-          freshVehicle,
-          payload
+      if (freshVehicle.device_id === 'ESP32-HW-001') {
+        const [rows] = await pool.execute(
+          `SELECT fuel_percent, observed_at
+           FROM hardware_fuel
+           WHERE vehicle_id = ?`,
+          [vehicle.id]
         );
 
-        const [duplicates] = await pool.execute(
-          `SELECT vehicle_id
-           FROM telemetry
-           WHERE telemetry_uuid = ?
-           LIMIT 1`,
-          [p.telemetry_uuid]
-        );
+        const sensor = rows[0];
 
-        if (duplicates.length) {
-          if (
-            String(duplicates[0].vehicle_id) !== key
-          ) {
-            bad('Telemetry UUID belongs to another vehicle.');
-          }
-
-          return {
-            duplicate: true,
-            vehicle: freshVehicle
-          };
-        }
-
-        const previous =
-          await telemetry.getLatestForVehicle(vehicle.id);
+        const age = sensor
+          ? Date.now() - new Date(sensor.observed_at).getTime()
+          : Infinity;
 
         if (
-          previous &&
-          Date.parse(p.recorded_at) <=
-            new Date(previous.recorded_at).getTime()
+          sensor?.fuel_percent == null ||
+          age < 0 ||
+          age > 10000
         ) {
-          bad('Out-of-order telemetry rejected.');
+          bad('Physical fuel sensor is stale or invalid.');
         }
 
-        return process(freshVehicle, p);
-      });
+        const percent = Number(sensor.fuel_percent);
+
+        payload = {
+          ...payload,
+          fuel_percent: percent,
+          sensor_observed_at: sensor.observed_at,
+          fuel_level_litres:
+            percent *
+            Number(freshVehicle.fuel_tank_capacity) /
+            100
+        };
+      }
+
+      const p = normalise(freshVehicle, payload);
+
+      const [duplicates] = await pool.execute(
+        `SELECT vehicle_id
+         FROM telemetry
+         WHERE telemetry_uuid = ?
+         LIMIT 1`,
+        [p.telemetry_uuid]
+      );
+
+      if (duplicates.length) {
+        if (String(duplicates[0].vehicle_id) !== key) {
+          bad('Telemetry UUID belongs to another vehicle.');
+        }
+
+        return {
+          duplicate: true,
+          vehicle: freshVehicle
+        };
+      }
+
+      const previous =
+        await telemetry.getLatestForVehicle(vehicle.id);
+
+      if (
+        previous &&
+        Date.parse(p.recorded_at) <=
+          new Date(previous.recorded_at).getTime()
+      ) {
+        bad('Out-of-order telemetry rejected.');
+      }
+
+      return process(freshVehicle, p);
+    });
 
     queues.set(key, task);
 
     const clean = () => {
-      if (queues.get(key) === task) {
-        queues.delete(key);
-      }
+      if (queues.get(key) === task) queues.delete(key);
     };
 
     task.then(clean, clean);
