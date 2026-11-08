@@ -6,18 +6,10 @@ const REFUEL_THRESHOLD_L = 30;
 const DEFAULT_MIN_KM_PER_L = 2.0;
 const MIN_DISTANCE_FOR_CONSUMPTION_CHECK_KM = 15;
 
-function detectRefuel(prevReading, currentReading) {
-  if (!prevReading) return null;
-  const prevFuel = Number(prevReading.fuel_level_litres);
-  const currentFuel = Number(currentReading.fuel_level_litres);
-  const rise = currentFuel - prevFuel;
-  if (rise < REFUEL_THRESHOLD_L) return null;
-  return {
-    litresAdded: Math.round(rise * 10) / 10,
-    oldLevel: prevFuel,
-    newLevel: currentFuel,
-    message: `Refuelling detected. Fuel level rose by ${Math.round(rise * 10) / 10} L (from ${prevFuel} L to ${currentFuel} L).`,
-  };
+function detectRefuel(previous, reading) {
+  return require('./fuelEvents')
+    .observe(previous, reading)
+    .refuel || null;
 }
 
 /**
