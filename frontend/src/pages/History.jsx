@@ -1,89 +1,265 @@
-import { useEffect, useState, useCallback } from 'react';
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Legend } from 'recharts';
-import { format } from 'date-fns';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState
+} from 'react';
+
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  CartesianGrid,
+  Legend
+} from 'recharts';
+
 import { vehicleApi } from '../api/endpoints';
 import HistoryMap from '../components/History/HistoryMap';
 import DateRangePicker from '../components/UI/DateRangePicker';
-import EmptyState from '../components/UI/EmptyState';
-import { SkeletonRows } from '../components/UI/Skeleton';
-import { MapPinned } from 'lucide-react';
 
-function defaultFrom() {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  return d.toISOString().slice(0, 10);
+function localDate(date) {
+  return (
+    `${date.getFullYear()}-` +
+    `${String(date.getMonth() + 1).padStart(2, '0')}-` +
+    `${String(date.getDate()).padStart(2, '0')}`
+  );
 }
 
 export default function History() {
   const [vehicles, setVehicles] = useState([]);
   const [vehicleId, setVehicleId] = useState('');
-  const [dateRange, setDateRange] = useState({ from: defaultFrom(), to: new Date().toISOString().slice(0, 10) });
+
+  const [range, setRange] = useState(() => ({
+    from: localDate(new Date(Date.now() - 86400000)),
+    to: localDate(new Date())
+  }));
+
   const [points, setPoints] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const request = useRef(0);
 
   useEffect(() => {
-    vehicleApi.list().then((list) => {
-      setVehicles(list);
-      if (list.length && !vehicleId) setVehicleId(String(list[0].id));
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    let active = true;
+
+    vehicleApi.list()
+      .then(list => {
+        if (active) {
+          setVehicles(list);
+
+          setVehicleId(
+            list.length ? String(list[0].id) : ''
+          );
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setError(
+            'Could not load vehicles. Refresh this page to retry.'
+          );
+        }
+      });
+
+    return () => {
+      active = false;
+      request.current++;
+    };
   }, []);
 
   const load = useCallback(async () => {
-    if (!vehicleId) return;
+    const id = ++request.current;
+
+    if (!vehicleId) {
+      setLoading(false);
+      setPoints([]);
+      return;
+    }
+
     setLoading(true);
-    const data = await vehicleApi.history(vehicleId, {
-      from: dateRange.from ? `${dateRange.from}T00:00:00` : undefined,
-      to: dateRange.to ? `${dateRange.to}T23:59:59` : undefined,
-    });
-    setPoints(data.points || []);
-    setLoading(false);
-  }, [vehicleId, dateRange]);
+    setError('');
 
-  useEffect(() => { load(); }, [load]);
+    try {
+      if (
+        range.from &&
+        range.to &&
+        range.from > range.to
+      ) {
+        throw new Error(
+          'Start date must not be after end date.'
+        );
+      }
 
-  const chartData = points.map((p) => ({
-    time: format(new Date(p.recorded_at), 'HH:mm'),
-    fuel_percent: p.fuel_percent,
-    speed: p.speed,
-  }));
+      const result = await vehicleApi.history(
+        vehicleId,
+        {
+          from: range.from
+            ? new Date(
+                `${range.from}T00:00:00`
+              ).toISOString()
+            : undefined,
+
+          to: range.to
+            ? new Date(
+                `${range.to}T23:59:59.999`
+              ).toISOString()
+            : undefined,
+
+          limit: 5000
+        }
+      );
+
+      if (id === request.current) {
+        setPoints(
+          Array.isArray(result.points)
+            ? result.points
+            : []
+        );
+      }
+    } catch (err) {
+      if (id === request.current) {
+        setPoints([]);
+        setError(
+          err.message || 'History could not be loaded.'
+        );
+      }
+    } finally {
+      if (id === request.current) {
+        setLoading(false);
+      }
+    }
+  }, [vehicleId, range.from, range.to]);
+
+  useEffect(() => {
+    load();
+
+    return () => {
+      request.current++;
+    };
+  }, [load]);
+
+  const chart = points
+    .filter(p =>
+      Number.isFinite(Date.parse(p.recorded_at))
+    )
+    .map(p => ({
+      ...p,
+      time: new Date(p.recorded_at).toLocaleTimeString()
+    }));
 
   return (
     <div>
       <h1>Route History</h1>
-      <p style={{ color: 'var(--fm-muted)', marginBottom: 16 }}>Replay a vehicle&rsquo;s actual recorded route, fuel level and speed.</p>
 
-      <div className="fm-card fm-card-pad" style={{ marginBottom: 16 }}>
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center' }}>
-          <select className="fm-select" style={{ width: 220 }} value={vehicleId} onChange={(e) => setVehicleId(e.target.value)}>
-            {vehicles.map((v) => <option key={v.id} value={v.id}>{v.name} ({v.license_plate})</option>)}
-          </select>
-          <DateRangePicker from={dateRange.from} to={dateRange.to} onChange={setDateRange} />
-        </div>
+      <p>
+        Recorded demonstration telemetry. Movement is simulated;
+        hardware fuel is a scaled model reading.
+      </p>
+
+      <div
+        className="fm-card fm-card-pad"
+        style={{
+          display: 'flex',
+          gap: 12,
+          flexWrap: 'wrap',
+          marginBottom: 16
+        }}
+      >
+        <select
+          className="fm-select"
+          value={vehicleId}
+          onChange={e => setVehicleId(e.target.value)}
+        >
+          <option value="">Select vehicle</option>
+
+          {vehicles.map(v => (
+            <option key={v.id} value={v.id}>
+              {v.name} ({v.license_plate})
+            </option>
+          ))}
+        </select>
+
+        <DateRangePicker
+          from={range.from}
+          to={range.to}
+          onChange={setRange}
+        />
+
+        <button
+          className="fm-btn fm-btn-secondary"
+          onClick={load}
+          disabled={loading || !vehicleId}
+        >
+          {loading ? 'Loading…' : 'Load / Retry'}
+        </button>
       </div>
 
-      {loading ? (
-        <SkeletonRows rows={6} height={40} />
-      ) : points.length === 0 ? (
-        <div className="fm-card fm-card-pad">
-          <EmptyState icon={MapPinned} title="No telemetry for this period" description="Try a wider date range, or start the simulator / device for this vehicle." />
-        </div>
-      ) : (
+      {error && <p role="alert">{error}</p>}
+
+      {!loading && !points.length && (
+        <p>No telemetry for this selection.</p>
+      )}
+
+      {points.length > 0 && (
         <>
-          <div className="fm-card" style={{ height: 420, marginBottom: 16 }}>
+          {points.length >= 5000 && (
+            <p>
+              Results reached the 5,000-point limit.
+              Narrow the date range to inspect the full period.
+            </p>
+          )}
+
+          <div
+            className="fm-card"
+            style={{
+              height: 420,
+              marginBottom: 16
+            }}
+          >
             <HistoryMap points={points} />
           </div>
+
           <div className="fm-card fm-card-pad">
-            <h3>Fuel &amp; Speed Timeline</h3>
-            <ResponsiveContainer width="100%" height={240}>
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--fm-border)" />
-                <XAxis dataKey="time" fontSize={12} />
-                <YAxis fontSize={12} domain={[0, 'auto']} />
+            <h3>Fuel and speed</h3>
+
+            <ResponsiveContainer width="100%" height={260}>
+              <LineChart data={chart}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="time" />
+
+                <YAxis
+                  yAxisId="fuel"
+                  domain={[0, 100]}
+                  unit="%"
+                />
+
+                <YAxis
+                  yAxisId="speed"
+                  orientation="right"
+                  unit=" km/h"
+                />
+
                 <Tooltip />
                 <Legend />
-                <Line type="monotone" dataKey="fuel_percent" name="Fuel %" stroke="#00D4AA" dot={false} strokeWidth={2} />
-                <Line type="monotone" dataKey="speed" name="Speed (km/h)" stroke="#22D3EE" dot={false} strokeWidth={2} />
+
+                <Line
+                  yAxisId="fuel"
+                  dataKey="fuel_percent"
+                  name="Fuel %"
+                  stroke="#00D4AA"
+                  dot={false}
+                />
+
+                <Line
+                  yAxisId="speed"
+                  dataKey="speed"
+                  name="Speed km/h"
+                  stroke="#22D3EE"
+                  dot={false}
+                />
               </LineChart>
             </ResponsiveContainer>
           </div>
