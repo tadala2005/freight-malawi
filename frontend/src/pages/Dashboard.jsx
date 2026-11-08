@@ -1,13 +1,19 @@
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from 'react';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+
 import {
   Truck,
   Route as RouteIcon,
   Fuel,
   Gauge,
-  Bell,
-  AlertTriangle
+  Bell
 } from 'lucide-react';
 
 import { useAuth } from '../context/AuthContext';
@@ -16,588 +22,430 @@ import api from '../api/axios';
 
 import KPICard from '../components/Dashboard/KPICard';
 import LiveMap from '../components/Dashboard/LiveMap';
-import { VehicleStatusBadge } from '../components/UI/Badge';
-import { SkeletonRows } from '../components/UI/Skeleton';
-import EmptyState from '../components/UI/EmptyState';
-import AlertCard from '../components/Alerts/AlertCard';
 import IgnitionSwitch from '../components/Dashboard/IgnitionSwitch';
+import AlertCard from '../components/Alerts/AlertCard';
+import { VehicleStatusBadge } from '../components/UI/Badge';
 
-// ===================================================
-// FREIGHT MALAWI — LIVE HARDWARE FUEL DASHBOARD
-// ===================================================
+const HW = 'ESP32-HW-001';
 
-const HARDWARE_DEVICE_ID = 'ESP32-HW-001';
-const SENSOR_FRESH_MS = 20000;
+const number = value =>
+  value == null || value === '' ? NaN : Number(value);
 
-const asNumber = (value, fallback = 0) => {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
-};
+const time = value =>
+  Date.parse(value || '') || 0;
 
-function isReporting(vehicle) {
-  if (vehicle.current_status === 'OFFLINE') {
-    return false;
-  }
-
-  if (!vehicle.last_seen_at) {
-    return true;
-  }
-
-  const lastSeen = new Date(vehicle.last_seen_at).getTime();
+function recent(value, now, limit) {
+  const age = now - time(value);
 
   return (
-    !Number.isFinite(lastSeen) ||
-    Date.now() - lastSeen < 90000
+    time(value) > 0 &&
+    age >= -3000 &&
+    age <= limit
   );
 }
 
 export default function Dashboard() {
-  const { getSocket } = useAuth();
+  const { getSocket, connectionStatus } = useAuth();
   const navigate = useNavigate();
 
   const [vehicles, setVehicles] = useState([]);
   const [summary, setSummary] = useState(null);
-  const [recentAlerts, setRecentAlerts] = useState([]);
-  const [vehicleFilterId, setVehicleFilterId] = useState('');
+  const [incidents, setIncidents] = useState([]);
+  const [selected, setSelected] = useState('');
+  const [search, setSearch] = useState('');
+  const [sensor, setSensor] = useState(null);
+  const [clock, setClock] = useState(Date.now());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  const [clock, setClock] = useState(Date.now());
-  const [hardwareFuel, setHardwareFuel] = useState(null);
+  const request = useRef(0);
+  const revisions = useRef(new Map());
+  const revision = useRef(0);
 
-  // ===================================================
-  // 1. LOAD DASHBOARD DATA
-  // ===================================================
+  const touch = id => {
+    revisions.current.set(
+      String(id),
+      ++revision.current
+    );
+  };
 
-  const loadAll = useCallback(async () => {
+  const mergeSensor = useCallback(incoming => {
+    if (!incoming) return;
+
+    setSensor(previous =>
+      time(previous?.observed_at) > time(incoming.observed_at)
+        ? previous
+        : incoming
+    );
+  }, []);
+
+  const load = useCallback(async () => {
+    const id = ++request.current;
+    const started = revision.current;
+
     try {
-      const params = vehicleFilterId
-        ? { vehicleId: vehicleFilterId }
-        : undefined;
+      const params = selected
+        ? { vehicleId: selected }
+        : {};
 
-      const [
-        vehicleList,
-        fleetSummary,
-        alerts
-      ] = await Promise.all([
+      const [list, stats, alerts] = await Promise.all([
         vehicleApi.list(),
         reportApi.fleet(params),
         alertApi.list({
+          ...params,
           scope: 'active',
           acknowledged: false,
-          limit: 30,
-          ...(params || {})
+          limit: 30
         })
       ]);
 
-      setVehicles(
-        Array.isArray(vehicleList) ? vehicleList : []
-      );
+      if (id !== request.current) return;
 
-      setSummary(fleetSummary);
+      setVehicles(previous => {
+        const existing = new Map(
+          previous.map(v => [String(v.id), v])
+        );
 
-      setRecentAlerts(
-        Array.isArray(alerts) ? alerts : []
-      );
+        return list.map(v => {
+          const old = existing.get(String(v.id));
 
+          return (
+            old &&
+            (revisions.current.get(String(v.id)) || 0) >
+              started
+          )
+            ? { ...v, ...old }
+            : v;
+        });
+      });
+
+      setSummary(stats);
+      setIncidents(alerts);
       setError('');
-    } catch (err) {
-      console.error('Dashboard refresh failed:', err);
-
-      setError(
-        'Unable to refresh the dashboard. Check your backend connection.'
-      );
+    } catch {
+      if (id === request.current) {
+        setError(
+          'Could not refresh the dashboard. Please retry.'
+        );
+      }
     } finally {
-      setLoading(false);
+      if (id === request.current) {
+        setLoading(false);
+      }
     }
-  }, [vehicleFilterId]);
+  }, [selected]);
 
   useEffect(() => {
     setSummary(null);
-    loadAll();
+    load();
 
-    const refresh = setInterval(loadAll, 20000);
-
-    // Used to detect when hardware readings go stale.
-    const clockTick = setInterval(() => {
-      setClock(Date.now());
-    }, 5000);
+    const timer = setInterval(load, 15000);
 
     return () => {
-      clearInterval(refresh);
-      clearInterval(clockTick);
+      clearInterval(timer);
+      request.current++;
     };
-  }, [loadAll]);
-
-  // ===================================================
-  // 2. FIND THE HARDWARE VEHICLE
-  // ===================================================
-
-  const hardwareVehicleId = useMemo(() => {
-    const hardware = vehicles.find(
-      v => v.device_id === HARDWARE_DEVICE_ID
-    );
-
-    return hardware?.id ?? null;
-  }, [vehicles]);
-
-  // ===================================================
-  // 3. POLL LIVE ESP32 SENSOR INDEPENDENTLY
-  // ===================================================
+  }, [load]);
 
   useEffect(() => {
-    if (!hardwareVehicleId) {
-      setHardwareFuel(null);
-      return undefined;
+    const timer = setInterval(
+      () => setClock(Date.now()),
+      1000
+    );
+
+    return () => clearInterval(timer);
+  }, []);
+
+  const hardwareId =
+    vehicles.find(v => v.device_id === HW)?.id;
+
+  useEffect(() => {
+    if (!hardwareId) {
+      setSensor(null);
+      return;
     }
 
     let active = true;
-    let inFlight = false;
+    let busy = false;
 
-    async function refreshPhysicalFuel() {
-      if (inFlight) return;
-
-      inFlight = true;
+    async function poll() {
+      if (busy) return;
+      busy = true;
 
       try {
         const response = await api.get(
-          `/devices/${hardwareVehicleId}/fuel`
+          `/devices/${hardwareId}/fuel`
         );
 
-        if (!active) return;
-
-        const incoming = response.data?.data;
-
-        if (incoming) {
-          setHardwareFuel(previous => {
-            if (
-              String(previous?.vehicle_id) ===
-                String(incoming.vehicle_id) &&
-              previous?.observed_at &&
-              incoming.observed_at &&
-              Date.parse(previous.observed_at) >
-                Date.parse(incoming.observed_at)
-            ) {
-              return previous;
-            }
-
-            return incoming;
-          });
-        }
-      } catch (err) {
         if (active) {
-          console.warn(
-            'Hardware fuel refresh failed:',
-            err.message
-          );
-
-          setHardwareFuel(previous =>
-            previous
-              ? { ...previous, fresh: false }
-              : null
-          );
+          mergeSensor(response.data.data);
         }
+      } catch {
+        // Failed requests do not create fresh measurements.
+        // The displayed sample expires according to its age.
       } finally {
-        inFlight = false;
+        busy = false;
       }
     }
 
-    refreshPhysicalFuel();
+    poll();
 
-    // Update independently of ignition every 2.5 seconds.
-    const poll = setInterval(
-      refreshPhysicalFuel,
-      2500
-    );
+    const timer = setInterval(poll, 2500);
 
     return () => {
       active = false;
-      clearInterval(poll);
+      clearInterval(timer);
     };
-  }, [hardwareVehicleId]);
-
-  // ===================================================
-  // 4. SOCKET.IO LIVE EVENTS
-  // ===================================================
+  }, [hardwareId, mergeSensor]);
 
   useEffect(() => {
     const socket = getSocket();
+    if (!socket) return;
 
-    if (!socket) {
-      return undefined;
-    }
+    const update = v => {
+      if (!v?.id) return;
 
-    const onVehicleUpdate = vehicle => {
-      setVehicles(previous =>
-        previous.map(v =>
-          String(v.id) === String(vehicle.id)
-            ? { ...v, ...vehicle }
-            : v
+      touch(v.id);
+
+      setVehicles(list =>
+        list.map(old =>
+          String(old.id) === String(v.id)
+            ? { ...old, ...v }
+            : old
         )
       );
     };
 
-    const onTelemetryUpdate = ({
-      vehicle_id,
-      reading
-    }) => {
-      setVehicles(previous =>
-        previous.map(v =>
-          String(v.id) === String(vehicle_id)
-            ? {
-                ...v,
-                latest_telemetry: reading
-              }
-            : v
-        )
+    const telemetry = ({ vehicle_id, reading }) => {
+      touch(vehicle_id);
+
+      setVehicles(list =>
+        list.map(v => {
+          if (
+            String(v.id) !== String(vehicle_id) ||
+            time(v.latest_telemetry?.recorded_at) >
+              time(reading.recorded_at)
+          ) {
+            return v;
+          }
+
+          return {
+            ...v,
+            latest_telemetry: reading,
+            last_seen_at: reading.recorded_at,
+            current_status: reading.ignition_on
+              ? (reading.speed > 3 ? 'MOVING' : 'IDLE')
+              : 'STOPPED'
+          };
+        })
       );
     };
 
-    // ESP32 fuel events are independent of ignition.
-    const onHardwareFuel = reading => {
-      if (
-        reading?.device_id !== HARDWARE_DEVICE_ID
-      ) {
-        return;
-      }
+    const trip = value => {
+      touch(value.vehicle_id);
 
-      setHardwareFuel(previous => {
-        if (
-          String(previous?.vehicle_id) ===
-            String(reading.vehicle_id) &&
-          previous?.observed_at &&
-          reading.observed_at &&
-          Date.parse(previous.observed_at) >
-            Date.parse(reading.observed_at)
-        ) {
-          return previous;
-        }
-
-        return reading;
-      });
-    };
-
-    const onAlertNew = alert => {
-      if (
-        vehicleFilterId &&
-        String(alert.vehicle_id) !== vehicleFilterId
-      ) {
-        return;
-      }
-
-      setRecentAlerts(previous =>
-        previous.some(a => a.id === alert.id)
-          ? previous
-          : [alert, ...previous].slice(0, 30)
-      );
-
-      setSummary(previous =>
-        previous
-          ? {
-              ...previous,
-              open_alerts:
-                asNumber(previous.open_alerts) + 1
-            }
-          : previous
-      );
-    };
-
-    const onTripUpdate = trip => {
-      setVehicles(previous =>
-        previous.map(v =>
-          String(v.id) === String(trip.vehicle_id)
+      setVehicles(list =>
+        list.map(v =>
+          String(v.id) === String(value.vehicle_id)
             ? {
                 ...v,
                 active_trip:
                   ['COMPLETED', 'CANCELLED'].includes(
-                    trip.status
+                    value.status
                   )
                     ? null
-                    : trip
+                    : value
+              }
+            : v
+        )
+      );
+
+      load();
+    };
+
+    const status = value => {
+      touch(value.vehicle_id);
+
+      setVehicles(list =>
+        list.map(v =>
+          String(v.id) === String(value.vehicle_id)
+            ? {
+                ...v,
+                current_status: value.status
               }
             : v
         )
       );
     };
 
-    const onDeviceStatus = ({
-      vehicle_id,
-      status
-    }) => {
-      setVehicles(previous =>
-        previous.map(v =>
-          String(v.id) === String(vehicle_id)
-            ? {
-                ...v,
-                current_status: status
-              }
-            : v
-        )
+    const incomingAlert = value => {
+      if (
+        selected &&
+        String(value.vehicle_id) !== selected
+      ) {
+        return;
+      }
+
+      setIncidents(list =>
+        list.some(a => String(a.id) === String(value.id))
+          ? list
+          : [value, ...list].slice(0, 30)
       );
+
+      load();
+    };
+
+    const hardware = value => {
+      if (value?.device_id === HW) {
+        mergeSensor(value);
+      }
     };
 
     const events = [
-      ['vehicle:update', onVehicleUpdate],
-      ['telemetry:update', onTelemetryUpdate],
-      ['hardware:fuel', onHardwareFuel],
-      ['alert:new', onAlertNew],
-      ['trip:started', onTripUpdate],
-      ['trip:updated', onTripUpdate],
-      ['trip:completed', onTripUpdate],
-      ['device:status', onDeviceStatus]
+      ['vehicle:update', update],
+      ['telemetry:update', telemetry],
+      ['device:status', status],
+      ['trip:started', trip],
+      ['trip:updated', trip],
+      ['trip:completed', trip],
+      ['hardware:fuel', hardware],
+      ['alert:new', incomingAlert],
+      ['alert:updated', load],
+      ['connect', load]
     ];
 
-    for (const [event, handler] of events) {
-      socket.on(event, handler);
-    }
+    events.forEach(([name, fn]) => socket.on(name, fn));
 
     return () => {
-      for (const [event, handler] of events) {
-        socket.off(event, handler);
-      }
-    };
-  }, [getSocket, vehicleFilterId]);
-
-  // ===================================================
-  // 5. VERIFY THE FUEL READING IS LIVE
-  // ===================================================
-
-  const sensorFuelIsLive = Boolean(
-    hardwareFuel?.fresh === true &&
-    hardwareFuel?.fuel_percent != null &&
-    Number.isFinite(
-      Number(hardwareFuel.fuel_percent)
-    ) &&
-    hardwareFuel?.observed_at &&
-    Number.isFinite(
-      Date.parse(hardwareFuel.observed_at)
-    ) &&
-    Math.max(clock, Date.now()) -
-      Date.parse(hardwareFuel.observed_at) >= -3000 &&
-    Math.max(clock, Date.now()) -
-      Date.parse(hardwareFuel.observed_at) <=
-        SENSOR_FRESH_MS
-  );
-
-  const physicalPercent = sensorFuelIsLive
-    ? Number(hardwareFuel.fuel_percent)
-    : null;
-
-  // ===================================================
-  // 6. OVERLAY REAL FUEL ON SIMULATED TELEMETRY
-  // ===================================================
-
-  const displayVehicles = useMemo(
-    () =>
-      vehicles.map(vehicle => {
-        if (
-          vehicle.device_id !== HARDWARE_DEVICE_ID ||
-          !sensorFuelIsLive ||
-          String(vehicle.id) !==
-            String(hardwareFuel?.vehicle_id) ||
-          !vehicle.latest_telemetry
-        ) {
-          return vehicle;
-        }
-
-        const percentage = Number(
-          hardwareFuel.fuel_percent
-        );
-
-        const capacity = asNumber(
-          vehicle.fuel_tank_capacity
-        );
-
-        return {
-          ...vehicle,
-          latest_telemetry: {
-            ...vehicle.latest_telemetry,
-            fuel_percent: percentage,
-            fuel_level_litres:
-              percentage * capacity / 100
-          }
-        };
-      }),
-    [vehicles, hardwareFuel, sensorFuelIsLive]
-  );
-
-  // ===================================================
-  // 7. VEHICLE FILTERING
-  // ===================================================
-
-  const visibleVehicles = useMemo(() => {
-    if (!vehicleFilterId) {
-      return displayVehicles;
-    }
-
-    return displayVehicles.filter(
-      v => String(v.id) === vehicleFilterId
-    );
-  }, [displayVehicles, vehicleFilterId]);
-
-  const selectedVehicle = vehicleFilterId
-    ? visibleVehicles[0]
-    : null;
-
-  // ===================================================
-  // 8. DASHBOARD KPI CALCULATIONS
-  // ===================================================
-
-  const live = useMemo(() => {
-    const reporting = visibleVehicles.filter(v => {
-      if (isReporting(v)) {
-        return true;
-      }
-
-      // A physical sensor counts as reporting even
-      // when the hardware truck's ignition is OFF.
-      return (
-        v.device_id === HARDWARE_DEVICE_ID &&
-        sensorFuelIsLive &&
-        String(v.id) ===
-          String(hardwareFuel?.vehicle_id)
-      );
-    });
-
-    const readings = reporting.flatMap(v => {
-      if (v.device_id === HARDWARE_DEVICE_ID) {
-        if (
-          !sensorFuelIsLive ||
-          String(v.id) !==
-            String(hardwareFuel?.vehicle_id)
-        ) {
-          return [];
-        }
-
-        return [{
-          fuel_level_litres:
-            Number(hardwareFuel.fuel_percent) *
-            asNumber(v.fuel_tank_capacity) /
-            100
-        }];
-      }
-
-      return v.latest_telemetry
-        ? [v.latest_telemetry]
-        : [];
-    });
-
-    const currentFuel = readings.reduce(
-      (sum, reading) =>
-        sum +
-        asNumber(reading.fuel_level_litres),
-      0
-    );
-
-    const moving = reporting.filter(
-      v =>
-        v.latest_telemetry &&
-        asNumber(v.latest_telemetry.speed) > 2
-    );
-
-    const avgSpeed = moving.length
-      ? moving.reduce(
-          (sum, v) =>
-            sum +
-            asNumber(
-              v.latest_telemetry.speed
-            ),
-          0
-        ) / moving.length
-      : 0;
-
-    const activeTrips = visibleVehicles.filter(
-      v => v.active_trip?.status === 'ACTIVE'
-    ).length;
-
-    const fuelCapacity = visibleVehicles.reduce(
-      (sum, v) =>
-        sum + asNumber(v.fuel_tank_capacity),
-      0
-    );
-
-    return {
-      total: visibleVehicles.length,
-      reporting: reporting.length,
-      activeTrips,
-      fuelLitres: currentFuel,
-      fuelCapacity,
-      hasReading: readings.length > 0,
-      avgSpeed,
-      movingCount: moving.length
+      events.forEach(([name, fn]) => socket.off(name, fn));
     };
   }, [
-    visibleVehicles,
-    clock,
-    sensorFuelIsLive,
-    hardwareFuel
+    getSocket,
+    connectionStatus,
+    selected,
+    load,
+    mergeSensor
   ]);
 
-  // ===================================================
-  // 9. ALERT HANDLING
-  // ===================================================
+  const sensorLive =
+    sensor?.fresh === true &&
+    Number.isFinite(number(sensor.fuel_percent)) &&
+    number(sensor.fuel_percent) >= 0 &&
+    number(sensor.fuel_percent) <= 100 &&
+    recent(sensor.observed_at, clock, 10000);
 
-  const newestTheftAlert = recentAlerts.find(
-    alert =>
-      alert.type === 'THEFT_SUSPECTED' &&
-      String(alert.severity).toUpperCase() ===
-        'CRITICAL'
+  const visible = useMemo(() =>
+    vehicles
+      .filter(v =>
+        (!selected || String(v.id) === selected) &&
+        `${v.name} ${v.license_plate} ${v.driver_name || ''}`
+          .toLowerCase()
+          .includes(search.toLowerCase())
+      )
+      .map(v => {
+        const live =
+          recent(v.last_seen_at, clock, 60000) &&
+          v.current_status !== 'OFFLINE';
+
+        const capacity = number(v.fuel_tank_capacity);
+        const isHardware = v.device_id === HW;
+
+        const fuel = isHardware
+          ? (
+              sensorLive &&
+              String(sensor.vehicle_id) === String(v.id)
+                ? number(sensor.fuel_percent) * capacity / 100
+                : NaN
+            )
+          : (
+              live
+                ? number(v.latest_telemetry?.fuel_level_litres)
+                : NaN
+            );
+
+        const validFuel =
+          Number.isFinite(fuel) &&
+          capacity > 0 &&
+          fuel >= 0 &&
+          fuel <= capacity;
+
+        return {
+          ...v,
+          current_status: live
+            ? v.current_status
+            : 'OFFLINE',
+
+          live,
+          displayFuel: validFuel ? fuel : null,
+
+          latest_telemetry:
+            v.latest_telemetry && isHardware
+              ? {
+                  ...v.latest_telemetry,
+                  fuel_level_litres: validFuel ? fuel : null,
+                  fuel_percent: validFuel
+                    ? fuel * 100 / capacity
+                    : null
+                }
+              : v.latest_telemetry
+        };
+      }),
+    [
+      vehicles,
+      selected,
+      search,
+      clock,
+      sensor,
+      sensorLive
+    ]
   );
 
-  function selectVehicle(id) {
-    setVehicleFilterId(
-      id == null || id === ''
-        ? ''
-        : String(id)
-    );
-  }
+  const reporting = visible.filter(v => v.live);
 
-  async function handleAcknowledge(id) {
+  const fuelVehicles =
+    visible.filter(v => v.displayFuel !== null);
+
+  const fuelTotal =
+    fuelVehicles.reduce(
+      (sum, v) => sum + v.displayFuel,
+      0
+    );
+
+  const moving = reporting.filter(
+    v => number(v.latest_telemetry?.speed) > 2
+  );
+
+  const speed = moving.length
+    ? moving.reduce(
+        (sum, v) =>
+          sum + number(v.latest_telemetry.speed),
+        0
+      ) / moving.length
+    : 0;
+
+  const hardwareVisible =
+    visible.some(v => v.device_id === HW);
+
+  const hardwareVehicle =
+    vehicles.find(v => v.device_id === HW);
+
+  async function acknowledge(id) {
     try {
       await alertApi.acknowledge(id);
 
-      setRecentAlerts(previous =>
-        previous.filter(a => a.id !== id)
+      setIncidents(list =>
+        list.filter(a => String(a.id) !== String(id))
       );
 
-      setSummary(previous =>
-        previous
-          ? {
-              ...previous,
-              open_alerts: Math.max(
-                0,
-                asNumber(previous.open_alerts) - 1
-              )
-            }
-          : previous
-      );
+      load();
     } catch {
-      setError(
-        'Could not acknowledge the alert.'
-      );
+      setError('Could not acknowledge the alert.');
     }
   }
 
-  // ===================================================
-  // 10. LOADING SCREEN
-  // ===================================================
-
   if (loading) {
-    return (
-      <div>
-        <h1>Dashboard</h1>
-        <SkeletonRows
-          rows={5}
-          height={80}
-          gap={14}
-        />
-      </div>
-    );
+    return <p>Loading fleet dashboard…</p>;
   }
-
-  // ===================================================
-  // 11. DASHBOARD INTERFACE
-  // ===================================================
 
   return (
     <div
@@ -607,668 +455,265 @@ export default function Dashboard() {
         gap: 18
       }}
     >
-      {/* PAGE HEADER */}
-
       <div className="fm-page-head">
         <div>
           <h1>Fleet Dashboard</h1>
-
-          <p style={{ color: 'var(--fm-muted)' }}>
-            Live data from authenticated device telemetry
-            {' · '}
-            {selectedVehicle
-              ? selectedVehicle.license_plate
-              : 'All vehicles'}
+          <p>
+            Demonstration fleet · simulated movement ·
+            physical fuel input on ESP32-HW-001
           </p>
         </div>
 
-        <label className="fm-field-inline">
-          <span>Vehicle view</span>
+        <select
+          value={selected}
+          onChange={e => setSelected(e.target.value)}
+          className="fm-select"
+        >
+          <option value="">All vehicles</option>
 
-          <select
-            value={vehicleFilterId}
-            onChange={event =>
-              selectVehicle(event.target.value)
-            }
-          >
-            <option value="">
-              All vehicles
+          {vehicles.map(v => (
+            <option key={v.id} value={v.id}>
+              {v.name} · {v.license_plate}
             </option>
-
-            {vehicles.map(vehicle => (
-              <option
-                key={vehicle.id}
-                value={vehicle.id}
-              >
-                {vehicle.name}
-                {' · '}
-                {vehicle.license_plate}
-              </option>
-            ))}
-          </select>
-        </label>
+          ))}
+        </select>
       </div>
 
-      {/* ERROR MESSAGE */}
+      <input
+        className="fm-input"
+        aria-label="Search vehicles"
+        placeholder="Search name, registration or driver"
+        value={search}
+        onChange={e => setSearch(e.target.value)}
+      />
 
       {error && (
-        <div
-          className="fm-card fm-card-pad"
-          role="alert"
-          style={{
-            border: '1px solid #F59E0B'
-          }}
-        >
+        <div className="fm-card fm-card-pad" role="alert">
           {error}
-
+          {' '}
           <button
-            type="button"
-            className="fm-btn fm-btn-ghost fm-btn-sm"
-            onClick={loadAll}
+            onClick={load}
+            className="fm-btn fm-btn-secondary"
           >
             Retry
           </button>
         </div>
       )}
 
-      {/* CRITICAL FUEL THEFT ALERT */}
-
-      {newestTheftAlert && (
-        <div
-          className="fm-card fm-card-pad"
-          role="alert"
-          style={{
-            border: '2px solid #EF4444',
-            background: 'rgba(239,68,68,.10)',
-            display: 'flex',
-            gap: 12,
-            alignItems: 'center'
-          }}
-        >
-          <AlertTriangle
-            color="#EF4444"
-            size={30}
-          />
-
-          <div style={{ flex: 1 }}>
-            <strong
-              style={{ color: '#EF4444' }}
-            >
-              CRITICAL — POSSIBLE FUEL THEFT
-            </strong>
-
-            <div>
-              {newestTheftAlert.vehicle_name}
-              {' ('}
-              {newestTheftAlert.license_plate}
-              {'): '}
-              {newestTheftAlert.message}
-            </div>
-
-            <div
-              style={{
-                color: 'var(--fm-muted)',
-                fontSize: 12
-              }}
-            >
-              Rule-based stationary fuel loss.
-              Investigate immediately.
-            </div>
-          </div>
-
-          <button
-            type="button"
-            className="fm-btn fm-btn-secondary fm-btn-sm"
-            onClick={() => navigate('/alerts')}
-          >
-            Review alert
-          </button>
-        </div>
-      )}
-
-      {/* ========================================
-          DASHBOARD KPI CARDS
-          ======================================== */}
-
       <div className="kpi-grid">
         <KPICard
           icon={Truck}
-          label="Reporting vehicles"
-          value={`${live.reporting}/${live.total}`}
+          label="Movement telemetry online"
+          value={`${reporting.length}/${visible.length}`}
           sub={
-            vehicleFilterId
-              ? 'Selected vehicle · live status'
-              : 'Currently reporting'
+            connectionStatus === 'live'
+              ? 'Dashboard connected'
+              : 'Dashboard reconnecting'
           }
         />
 
         <KPICard
           icon={RouteIcon}
           label="Active trips"
-          value={live.activeTrips}
-          sub="From current Logbook trip status"
-          onClick={() =>
-            navigate('/logbook?status=ACTIVE')
+          value={
+            visible.filter(
+              v => v.active_trip?.status === 'ACTIVE'
+            ).length
           }
+          onClick={() => navigate('/logbook')}
         />
 
         <KPICard
           icon={Fuel}
-          label="Current tank fuel"
+          label="Available fuel readings"
           value={
-            live.hasReading
-              ? `${live.fuelLitres.toLocaleString(
-                  undefined,
-                  {
-                    maximumFractionDigits: 1
-                  }
-                )} L`
+            fuelVehicles.length
+              ? `${fuelTotal.toFixed(1)} L`
               : '—'
           }
           sub={
-            selectedVehicle?.device_id ===
-              HARDWARE_DEVICE_ID
-              ? (
-                  sensorFuelIsLive
-                    ? `LIVE HC-SR04 · ${physicalPercent.toFixed(1)}% · ignition independent`
-                    : 'Waiting for current HC-SR04 sensor reading'
-                )
-              : (
-                  live.fuelCapacity
-                    ? `Configured tank capacity: ${live.fuelCapacity.toLocaleString()} L`
-                    : 'Awaiting telemetry'
-                )
+            `${fuelVehicles.length}/${visible.length} valid ` +
+            '· includes model-equivalent litres'
           }
         />
 
         <KPICard
           icon={Gauge}
-          label="Live speed"
-          value={`${live.avgSpeed.toFixed(1)} km/h`}
-          sub={
-            vehicleFilterId
-              ? 'Current selected vehicle speed'
-              : `Average moving speed · ${live.movingCount} moving`
-          }
+          label="Moving average speed"
+          value={`${speed.toFixed(1)} km/h`}
+          sub="Simulated movement"
         />
 
         <KPICard
           icon={Bell}
           label="Open alerts"
-          value={
-            summary
-              ? asNumber(summary.open_alerts)
-              : '…'
-          }
-          tone="red"
-          sub="Unacknowledged active incidents"
+          value={summary?.open_alerts ?? '—'}
           onClick={() => navigate('/alerts')}
         />
       </div>
 
-      {/* ========================================
-          REAL HARDWARE FUEL SENSOR DISPLAY
-          Shows even with ignition OFF.
-          ======================================== */}
+      {hardwareVisible && (
+        <div className="fm-card fm-card-pad">
+          <h3>Physical ultrasonic sensor</h3>
 
-      {selectedVehicle?.device_id ===
-        HARDWARE_DEVICE_ID && (
-        <div
-          className="fm-card fm-card-pad"
-          style={{
-            border:
-              '1px solid rgba(34,211,238,0.45)',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: 14
-          }}
-        >
-          <div
+          <p
             style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: 12,
-              flexWrap: 'wrap'
+              color: sensorLive
+                ? 'var(--fm-teal)'
+                : 'var(--fm-warning)'
             }}
           >
-            <div>
-              <h3 style={{ margin: 0 }}>
-                ESP32 Live Ultrasonic Fuel Sensor
-              </h3>
+            {sensorLive
+              ? 'SENSOR LIVE'
+              : 'SENSOR INVALID / STALE'}
+          </p>
 
-              <div
-                style={{
-                  color: '#F8FAFC',
-                  fontSize: 12,
-                  marginTop: 4
-                }}
-              >
-                Hardware input · Independent of
-                ignition and trip status
-              </div>
-            </div>
+          <strong style={{ fontSize: 32 }}>
+            {sensorLive
+              ? `${Number(sensor.fuel_percent).toFixed(1)}%`
+              : '—'}
+          </strong>
 
-            <span
-              role="status"
-              style={{
-                fontSize: 12,
-                fontWeight: 700,
-                color: sensorFuelIsLive
-                  ? '#00D4AA'
-                  : '#F59E0B'
-              }}
-            >
-              {sensorFuelIsLive
-                ? 'SENSOR LIVE'
-                : 'SENSOR OFFLINE / STALE'}
-            </span>
-          </div>
-
-          {/* ACTUAL FUEL VALUES */}
-
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'baseline',
-              flexWrap: 'wrap',
-              gap: 14
-            }}
-          >
-            <strong
-              className="mono"
-              style={{
-                fontSize: 36,
-                color: '#FFFFFF'
-              }}
-            >
-              {sensorFuelIsLive
-                ? `${physicalPercent.toFixed(1)}%`
-                : '—'}
-            </strong>
-
-            <span
-              style={{
-                fontSize: 18,
-                color: '#FFFFFF'
-              }}
-            >
-              {sensorFuelIsLive
-                ? `${(
-                    physicalPercent *
-                    asNumber(
-                      selectedVehicle.fuel_tank_capacity
-                    ) /
+          <p>
+            {sensorLive
+              ? `${
+                  (
+                    Number(sensor.fuel_percent) *
+                    Number(hardwareVehicle.fuel_tank_capacity) /
                     100
-                  ).toFixed(1)} L equivalent`
-                : 'Waiting for ESP32 telemetry'}
-            </span>
+                  ).toFixed(1)
+                } L equivalent`
+              : 'Waiting for a valid physical measurement.'}
+          </p>
 
-            {sensorFuelIsLive && (
-              <span
-                style={{
-                  fontSize: 13,
-                  color: '#FFFFFF'
-                }}
-              >
-                {(
-                  physicalPercent *
-                  Math.PI *
-                  3.25 *
-                  3.25 *
-                  6 /
-                  100
-                ).toFixed(1)}
-                {' mL physical'}
-              </span>
-            )}
-          </div>
-
-          {/* LIVE FUEL PROGRESS BAR */}
-
-          <div
-            role="progressbar"
-            aria-label="Physical sensor fuel level"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={
-              sensorFuelIsLive
-                ? physicalPercent
-                : undefined
+          <progress
+            max="100"
+            value={
+              sensorLive
+                ? Number(sensor.fuel_percent)
+                : 0
             }
-            style={{
-              height: 15,
-              width: '100%',
-              background:
-                'rgba(255,255,255,0.12)',
-              borderRadius: 999,
-              overflow: 'hidden'
-            }}
-          >
-            <div
-              style={{
-                height: '100%',
-                width: sensorFuelIsLive
-                  ? `${physicalPercent}%`
-                  : '0%',
-                background: '#00D4AA',
-                borderRadius: 999,
-                transition:
-                  'width 0.6s ease'
-              }}
-            />
-          </div>
+            style={{ width: '100%' }}
+          />
 
-          <div
-            style={{
-              color: '#FFFFFF',
-              fontSize: 12
-            }}
-          >
-            {hardwareFuel?.observed_at
-              ? `Last sensor update: ${new Date(
-                  hardwareFuel.observed_at
-                ).toLocaleTimeString()}`
-              : 'No sensor measurements received yet'}
-          </div>
+          <p>
+            Bench-model level only. Movement is simulated;
+            physical engine consumption is not measured.
+          </p>
+
+          <small>
+            Last sensor update:{' '}
+            {sensor?.observed_at
+              ? new Date(sensor.observed_at).toLocaleTimeString()
+              : 'none'}
+          </small>
         </div>
       )}
 
-      {/* ========================================
-          FLEET MAP AND VEHICLE LIST
-          ======================================== */}
-
       <div className="dashboard-grid">
-        {/* MAP */}
-
         <div
-          className="fm-card"
+          className="fm-card fm-card-pad"
           style={{
             height: 460,
+            minWidth: 0,
             display: 'flex',
             flexDirection: 'column'
           }}
         >
-          <div
-            style={{
-              padding: '14px 16px 0',
-              display: 'flex',
-              justifyContent: 'space-between'
-            }}
-          >
-            <h3 style={{ margin: 0 }}>
-              Live Fleet Map
-            </h3>
+          <h3>Simulated fleet map</h3>
 
-            {vehicleFilterId && (
-              <button
-                type="button"
-                className="fm-btn fm-btn-ghost fm-btn-sm"
-                onClick={() => selectVehicle('')}
-              >
-                Show all
-              </button>
-            )}
-          </div>
-
-          <div
-            style={{
-              flex: 1,
-              padding: 12
-            }}
-          >
+          <div style={{ flex: 1, minHeight: 0 }}>
             <LiveMap
-              vehicles={visibleVehicles}
+              vehicles={visible}
               selectedVehicleId={
-                vehicleFilterId
-                  ? Number(vehicleFilterId)
-                  : null
+                selected ? Number(selected) : null
               }
-              onSelectVehicle={selectVehicle}
+              onSelectVehicle={
+                id => setSelected(String(id))
+              }
             />
           </div>
         </div>
-
-        {/* VEHICLES */}
 
         <div
           className="fm-card fm-card-pad"
           style={{
             height: 460,
-            display: 'flex',
-            flexDirection: 'column'
+            overflowY: 'auto'
           }}
         >
-          <h3>
-            Vehicles
-            {vehicleFilterId
-              ? ' · Filtered'
-              : ''}
-          </h3>
+          <h3>Vehicles</h3>
 
-          {visibleVehicles.length === 0 ? (
-            <EmptyState
-              title="No vehicles"
-              description="Choose a vehicle or add a truck."
-            />
-          ) : (
+          {visible.map(v => (
             <div
+              key={v.id}
               style={{
-                overflowY: 'auto',
-                flex: 1,
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 8
+                padding: '12px 0',
+                borderBottom: '1px solid var(--fm-border)'
               }}
             >
-              {visibleVehicles.map(vehicle => (
-                <div
-                  key={vehicle.id}
-                  style={{
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    gap: 12,
-                    alignItems: 'center',
-                    padding: '10px 12px',
-                    borderRadius: 8,
-                    background:
-                      vehicleFilterId ===
-                      String(vehicle.id)
-                        ? 'var(--fm-navy-tint)'
-                        : 'transparent'
-                  }}
-                >
-                  {/* VEHICLE DETAILS */}
+              <button
+                className="fm-btn fm-btn-ghost"
+                onClick={() => navigate(`/vehicles/${v.id}`)}
+              >
+                {v.name} · {v.license_plate}
+              </button>
 
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        selectVehicle(vehicle.id)
-                      }
-                      style={{
-                        display: 'block',
-                        border: 0,
-                        padding: 0,
-                        background: 'transparent',
-                        color: 'inherit',
-                        fontWeight: 700,
-                        cursor: 'pointer',
-                        textAlign: 'left'
-                      }}
-                    >
-                      {vehicle.name}
-                    </button>
+              <div
+                style={{
+                  display: 'flex',
+                  gap: 12,
+                  alignItems: 'center',
+                  flexWrap: 'wrap'
+                }}
+              >
+                <VehicleStatusBadge
+                  status={v.current_status}
+                />
 
-                    <div
-                      style={{
-                        color: '#FFFFFF',
-                        fontSize: 12
-                      }}
-                    >
-                      {vehicle.license_plate}
-                      {' · '}
-                      {vehicle.driver_name ||
-                        'Unassigned'}
-                    </div>
+                <IgnitionSwitch
+                  vehicle={v}
+                  compact
+                />
 
-                    {vehicle.active_trip && (
-                      <div
-                        style={{
-                          fontSize: 11,
-                          marginTop: 4,
-                          color: '#FFFFFF'
-                        }}
-                      >
-                        Trip: {
-                          vehicle.active_trip.status
-                        }
-                      </div>
-                    )}
+                <span>
+                  {v.displayFuel === null
+                    ? 'Fuel unavailable'
+                    : `${v.displayFuel.toFixed(1)} / ` +
+                      `${Number(v.fuel_tank_capacity).toFixed(0)} L` +
+                      `${v.device_id === HW ? ' equivalent' : ''}`}
+                </span>
+              </div>
 
-                    <button
-                      type="button"
-                      className="fm-btn fm-btn-ghost fm-btn-sm"
-                      onClick={() =>
-                        navigate(
-                          `/vehicles/${vehicle.id}`
-                        )
-                      }
-                    >
-                      Details
-                    </button>
-                  </div>
-
-                  {/* STATUS, IGNITION AND FUEL */}
-
-                  <div
-                    style={{
-                      textAlign: 'right',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'flex-end',
-                      gap: 6
-                    }}
-                  >
-                    <VehicleStatusBadge
-                      status={
-                        vehicle.current_status
-                      }
-                    />
-
-                    {/* Original ignition button */}
-                    <IgnitionSwitch
-                      vehicle={vehicle}
-                      compact
-                    />
-
-                    {vehicle.device_id ===
-                    HARDWARE_DEVICE_ID ? (
-                      <div
-                        style={{
-                          fontSize: 12,
-                          color: '#FFFFFF'
-                        }}
-                      >
-                        {sensorFuelIsLive &&
-                        String(vehicle.id) ===
-                          String(hardwareFuel?.vehicle_id)
-                          ? `${physicalPercent.toFixed(1)}% real fuel · `
-                          : 'Sensor offline · '}
-
-                        {vehicle.latest_telemetry
-                          ? `${asNumber(
-                              vehicle.latest_telemetry.speed
-                            ).toFixed(1)} km/h simulated`
-                          : 'No movement telemetry'}
-                      </div>
-                    ) : (
-                      vehicle.latest_telemetry && (
-                        <div
-                          style={{
-                            fontSize: 12,
-                            color: '#FFFFFF'
-                          }}
-                        >
-                          {asNumber(
-                            vehicle.latest_telemetry
-                              .fuel_percent
-                          ).toFixed(1)}
-                          {'% fuel · '}
-
-                          {asNumber(
-                            vehicle.latest_telemetry
-                              .speed
-                          ).toFixed(1)}
-                          {' km/h'}
-                        </div>
-                      )
-                    )}
-                  </div>
-                </div>
-              ))}
+              <small>
+                Trip: {v.active_trip?.status || 'None'}
+              </small>
             </div>
+          ))}
+
+          {!visible.length && (
+            <p>No vehicles match this view.</p>
           )}
         </div>
       </div>
 
-      {/* ========================================
-          RECENT ACTIVE ALERTS
-          ======================================== */}
-
       <div className="fm-card fm-card-pad">
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: 10
-          }}
-        >
-          <h3 style={{ margin: 0 }}>
-            Recent Active Alerts
-            {selectedVehicle
-              ? ` · ${selectedVehicle.license_plate}`
-              : ''}
-          </h3>
+        <h3>Recent active alerts</h3>
 
-          <button
-            type="button"
-            className="fm-btn fm-btn-ghost fm-btn-sm"
-            onClick={() => navigate('/alerts')}
-          >
-            View all
-          </button>
-        </div>
-
-        {recentAlerts.length === 0 ? (
-          <EmptyState
-            icon={Bell}
-            title="No active alerts"
-            description="There are no unacknowledged active incidents for this selection."
-          />
-        ) : (
-          <div
-            style={{
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 10
-            }}
-          >
-            {recentAlerts.slice(0, 10).map(alert => (
-              <AlertCard
-                key={alert.id}
-                alert={alert}
-                onAcknowledge={
-                  handleAcknowledge
-                }
-                onOpenVehicle={id =>
-                  navigate(`/vehicles/${id}`)
-                }
-              />
-            ))}
-          </div>
+        {!incidents.length && (
+          <p>No active alerts for this vehicle selection.</p>
         )}
+
+        {incidents.slice(0, 10).map(a => (
+          <AlertCard
+            key={a.id}
+            alert={a}
+            onAcknowledge={acknowledge}
+            onOpenVehicle={
+              id => navigate(`/vehicles/${id}`)
+            }
+          />
+        ))}
       </div>
     </div>
   );
