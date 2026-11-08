@@ -69,7 +69,6 @@ async function getReading(vehicle) {
   return {
     vehicle_id: vehicle.id,
     device_id: vehicle.device_id,
-
     fuel_percent: percent,
 
     fuel_level_litres: percent === null
@@ -217,14 +216,12 @@ router.get('/:id/status', async (req, res, next) => {
 
     res.json({
       success: true,
-
       data: {
         vehicle_id: vehicle.id,
         device_id: vehicle.device_id,
         status: vehicle.current_status,
         last_seen_at: vehicle.last_seen_at,
         offline_threshold_seconds: OFFLINE_THRESHOLD_SECONDS,
-
         last_reading:
           await telemetryModel.getLatestForVehicle(vehicle.id)
       }
