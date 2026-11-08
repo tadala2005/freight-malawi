@@ -1,8 +1,7 @@
-
 {
   "backendUrl": "https://freight-malawi.onrender.com",
   "telemetryIntervalMs": 2000,
-  "simulationTimeScale": 30,
+  "simulationTimeScale": 1,
   "vehicles": [
     {
       "deviceId": "ESP32-001",
@@ -10,7 +9,7 @@
       "tankCapacity": 400,
       "payloadCapacity": 12000,
       "overspeedThresholdKmh": 80,
-      "scenario": "NORMAL"
+      "scenario": "REFUEL"
     },
     {
       "deviceId": "ESP32-002",
