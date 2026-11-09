@@ -119,7 +119,7 @@ class VehicleSimulator {
         deviceKey: this.cfg.deviceKey
       },
 
-      transports: ['websocket', 'polling'],
+      transports: ['polling'],
       reconnection: true,
       reconnectionDelay: 2000,
       reconnectionDelayMax: 10000,
