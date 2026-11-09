@@ -1,34 +1,29 @@
-// ============================================================================
-// Rate limiters. Auth endpoints get a strict limit to slow brute-forcing;
-// telemetry gets a more generous per-device-friendly limit since a fleet of
-// vehicles may share a NAT/proxy IP in some deployments.
-// ============================================================================
+
+'use strict';
+
 const rateLimit = require('express-rate-limit');
 
-const jsonLimitResponse = (message) => (req, res) => {
-  res.status(429).json({ success: false, error: { message, code: 'RATE_LIMITED' } });
+const respondWithLimit = (message) => (req, res) => {
+  return res.status(429).json({
+    success: false,
+    error: {
+      code: 'RATE_LIMITED',
+      message
+    }
+  });
 };
 
-// 20/15min in production; configurable (default 100/15min) outside production
-// so local QA — including the deliberate repeated-attempt security tests —
-// doesn't get locked out mid-session.
-const isProduction = process.env.NODE_ENV === 'production';
-const AUTH_RATE_LIMIT_MAX = Number(process.env.AUTH_RATE_LIMIT_MAX) || (isProduction ? 20 : 100);
+const production = process.env.NODE_ENV === 'production';
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: AUTH_RATE_LIMIT_MAX,
+  max: Number(process.env.AUTH_RATE_LIMIT_MAX) ||
+       (production ? 20 : 100),
   standardHeaders: true,
   legacyHeaders: false,
-  handler: jsonLimitResponse('Too many attempts. Please wait a few minutes and try again.'),
-});
-
-const telemetryLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 120, // supports several vehicles reporting every ~5s from one gateway
-  standardHeaders: true,
-  legacyHeaders: false,
-  handler: jsonLimitResponse('Telemetry rate limit exceeded.'),
+  handler: respondWithLimit(
+    'Too many authentication attempts.'
+  )
 });
 
 const generalLimiter = rateLimit({
@@ -36,7 +31,44 @@ const generalLimiter = rateLimit({
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,
-  handler: jsonLimitResponse('Too many requests. Please slow down.'),
+  handler: respondWithLimit(
+    'Too many requests.'
+  )
 });
 
-module.exports = { authLimiter, telemetryLimiter, generalLimiter };
+const telemetryLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: respondWithLimit(
+    'Telemetry rate limit exceeded.'
+  )
+});
+
+// Apply only AFTER deviceAuthMiddleware.
+const hardwareFuelLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 180,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    if (!req.vehicle?.id) {
+      throw new Error(
+        'Hardware limiter requires authenticated vehicle'
+      );
+    }
+
+    return `hardware:${req.vehicle.id}`;
+  },
+  handler: respondWithLimit(
+    'Hardware telemetry rate limit exceeded.'
+  )
+});
+
+module.exports = {
+  authLimiter,
+  generalLimiter,
+  telemetryLimiter,
+  hardwareFuelLimiter
+};
